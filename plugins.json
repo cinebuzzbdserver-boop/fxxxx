@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "fibwatch",
+      "name": "Fibwatch",
+      "version": 1,
+      "status": 1,
+      "entryClass": "com.flixora.providers.FibwatchProvider",
+      "downloadUrl": "https://raw.githubusercontent.com/your-username/flixora-plugins/main/Fibwatch.cs3"
+    },
+    {
+      "id": "cinecrack",
+      "name": "CineCrack",
+      "version": 1,
+      "status": 0,
+      "entryClass": "com.flixora.providers.CineCrackProvider",
+      "downloadUrl": "https://raw.githubusercontent.com/your-username/flixora-plugins/main/CineCrack.cs3"
+    }
+  ]
+}
