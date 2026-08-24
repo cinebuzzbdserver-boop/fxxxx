@@ -10,12 +10,12 @@
       "downloadUrl": "https://raw.githubusercontent.com/your-username/flixora-plugins/main/Fibwatch.cs3"
     },
     {
-      "id": "cinecrack",
-      "name": "CineCrack",
+      "id": "cinefreak",
+      "name": "CineFreak",
       "version": 1,
       "status": 1,
-      "entryClass": "com.flixora.providers.CineCrackProvider",
-      "downloadUrl": "https://raw.githubusercontent.com/your-username/flixora-plugins/main/CineCrack.cs3"
+      "entryClass": "com.flixora.providers.CineFreakProvider",
+      "downloadUrl": "https://raw.githubusercontent.com/your-username/flixora-plugins/main/CineFreak.cs3"
     }
   ]
 }
