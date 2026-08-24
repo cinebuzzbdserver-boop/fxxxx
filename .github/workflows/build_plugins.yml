@@ -16,38 +16,37 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install Android SDK Commandline Tools
-        run: |
-          mkdir -p $HOME/android-sdk/cmdline-tools
-          curl -sLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip
-          unzip -q cmdline-tools.zip -d $HOME/android-sdk/cmdline-tools
-          mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
-          export ANDROID_HOME=$HOME/android-sdk
-          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "build-tools;34.0.0" "platforms;android-34" > /dev/null
-
-      - name: Download Kotlin Compiler & Jsoup
+      - name: Download Compiler & Jsoup
         run: |
           curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
-          unzip -q kotlinc.zip
+          unzip -qo kotlinc.zip
 
-      - name: Compile and Dex to FLX
+      - name: Build Plugins to FLX
         run: |
-          export ANDROID_JAR=$HOME/android-sdk/platforms/android-34/android.jar
-          export D8=$HOME/android-sdk/build-tools/34.0.0/d8
+          # রানারে থাকা প্রি-ইনস্টল্ড অ্যান্ড্রয়েড প্ল্যাটফর্ম এবং d8 পাথ
+          ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
+          D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
 
-          # কমন ইন্টারফেস টেমপ্লেট
-          mkdir -p shared/com/flixora/plugin
-          cat << 'EOF' > shared/com/flixora/plugin/MainAPI.kt
+          echo "Using Android Jar: $ANDROID_JAR"
+          echo "Using D8 Tool: $D8_TOOL"
+
+          # কমন ইন্টারফেস
+          mkdir -p src/com/flixora/plugin
+          cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
           package com.flixora.plugin
-          data class MovieItem(val title: String, val image: String, val url: String)
+
+          data class MovieItem(
+              val title: String,
+              val image: String,
+              val url: String
+          )
+
           abstract class MainAPI {
               abstract var name: String
               abstract var mainUrl: String
@@ -56,34 +55,31 @@ jobs:
           }
           EOF
 
-          # plugins ফোল্ডারের ফাইল কম্পাইল
-          if [ -d "plugins" ]; then
-            for file in plugins/*.kt; do
-              if [ -f "$file" ]; then
-                baseName=$(basename "$file" .kt)
-                outputName=$(echo "$baseName" | sed 's/Provider$//')
-                echo "===> Compiling: $baseName.kt -> ${outputName}.flx"
+          # কম্পাইল ও ডেক্সিং
+          for file in plugins/*.kt; do
+            if [ -f "$file" ]; then
+              baseName=$(basename "$file" .kt)
+              outputName=$(echo "$baseName" | sed 's/Provider$//')
+              echo "===> Processing: $baseName.kt -> $outputName.flx"
 
-                # ১. কটলিন কম্পাইল (Android SDK + Jsoup সহ)
-                ./kotlinc/bin/kotlinc "$file" shared/com/flixora/plugin/MainAPI.kt \
-                  -cp "jsoup.jar:$ANDROID_JAR" \
-                  -include-runtime \
-                  -d "${outputName}_raw.jar"
+              # ১. কটলিন কম্পাইল
+              ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
+                -cp "jsoup.jar:$ANDROID_JAR" \
+                -d "${outputName}_temp.jar"
 
-                # ২. অফিশিয়াল Android D8 দিয়ে ডেক্স রূপান্তর
-                $D8 --release --min-api 21 --lib "$ANDROID_JAR" --output "dex_out_${outputName}" "${outputName}_raw.jar" jsoup.jar
+              # ২. প্রি-ইনস্টল্ড D8 দিয়ে ডেক্স বাইনারি তৈরি
+              mkdir -p "dex_out_${outputName}"
+              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar
 
-                # ৩. রুট ফোল্ডারে .flx মুভ
-                mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
-                rm -rf "dex_out_${outputName}" "${outputName}_raw.jar"
-              fi
-            done
-          fi
+              # ৩. classes.dex ফাইলকে .flx হিসেবে মুভ করা
+              mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
+              rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
+            fi
+          done
 
-          # ক্লিনআপ
-          rm -rf shared kotlinc kotlinc.zip jsoup.jar
+          rm -rf src kotlinc kotlinc.zip jsoup.jar
 
-      - name: Push FLX Files to Repo
+      - name: Commit and Push FLX Binaries
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
