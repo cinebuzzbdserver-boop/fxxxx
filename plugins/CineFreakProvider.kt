@@ -1,7 +1,7 @@
 package com.flixora.providers
 
 import com.flixora.plugin.MainAPI
-import com.flixora.screens.MovieItem
+import com.flixora.plugin.MovieItem
 import org.jsoup.Jsoup
 
 class CineFreakProvider : MainAPI() {
@@ -20,13 +20,7 @@ class CineFreakProvider : MainAPI() {
                 val title = card.selectFirst(".movie-card-title")?.text()?.trim() ?: ""
 
                 if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(
-                        MovieItem(
-                            title = title,
-                            image = image,
-                            url = url
-                        )
-                    )
+                    list.add(MovieItem(title = title, image = image, url = url))
                 }
             }
         } catch (e: Exception) {
@@ -48,13 +42,7 @@ class CineFreakProvider : MainAPI() {
                 val title = card.selectFirst(".movie-card-title")?.text()?.trim() ?: ""
 
                 if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(
-                        MovieItem(
-                            title = title,
-                            image = image,
-                            url = url
-                        )
-                    )
+                    list.add(MovieItem(title = title, image = image, url = url))
                 }
             }
         } catch (e: Exception) {
