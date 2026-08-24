@@ -22,15 +22,14 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Install Android Build-Tools & Kotlin Compiler
+      - name: Setup Tools and Compile Plugins
         run: |
-          sudo apt-get update && sudo apt-get install -y android-sdk-build-tools
+          # ডিপেন্ডেন্সি ডাউনলোড
           curl -Lo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
+          curl -Lo r8.jar https://repo1.maven.org/maven2/com/android/tools/r8/8.2.33/r8-8.2.33.jar
           curl -Lo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -q kotlinc.zip
 
-      - name: Compile Each .kt to .flx Binary
-        run: |
           # কমন ইন্টারফেস টেমপ্লেট
           cat << 'EOF' > MainAPI_temp.kt
           package com.flixora.plugin
@@ -43,28 +42,34 @@ jobs:
           }
           EOF
 
-          # plugins ফোল্ডারের প্রতিটির জন্য .flx তৈরি এবং নাম থেকে Provider বাদ দিয়ে সেভ করা
+          # plugins ফোল্ডারের প্রতিটি .kt ফাইল কম্পাইল ও .flx বাইনারি তৈরি
           for file in plugins/*.kt; do
             if [ -f "$file" ]; then
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
-              echo "===> Compiling: $baseName.kt -> Root/${outputName}.flx"
+              echo "===> Processing: $baseName.kt -> $outputName.flx"
 
-              # কটলিন কম্পাইল
+              # ১. কটলিন কোড কম্পাইল
               ./kotlinc/bin/kotlinc "$file" MainAPI_temp.kt -cp jsoup.jar -include-runtime -d "${outputName}_temp.jar"
 
-              # Android DEX (.flx) কনভার্ট
-              d8 --output "${outputName}.flx" "${outputName}_temp.jar" jsoup.jar
+              # ২. Android D8 দিয়ে ডেক্স বাইনারি তৈরি
+              mkdir -p "dex_out_${outputName}"
+              java -cp r8.jar com.android.tools.r8.D8 --release --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar
 
-              rm -f "${outputName}_temp.jar"
+              # ৩. classes.dex ফাইলকে .flx নামে রুট ফোল্ডারে মুভ করা
+              mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
+
+              # ক্লিনআপ
+              rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
           done
-          rm -f MainAPI_temp.kt
+          rm -f MainAPI_temp.kt jsoup.jar r8.jar kotlinc.zip
+          rm -rf kotlinc
 
-      - name: Commit and Push FLX Binaries to Root
+      - name: Commit and Push FLX Binaries
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           git add *.flx
-          git commit -m "Auto-compiled plugins to root .flx binaries" || exit 0
+          git commit -m "Auto-compiled plugins to .flx binaries" || exit 0
           git push
