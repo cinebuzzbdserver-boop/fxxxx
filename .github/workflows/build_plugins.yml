@@ -2,8 +2,7 @@ name: Build Plugins to FLX Binaries
 
 on:
   push:
-    paths:
-      - 'plugins/**.kt'
+    branches: [ "main" ]
   workflow_dispatch:
 
 permissions:
@@ -24,13 +23,11 @@ jobs:
 
       - name: Setup Tools and Compile Plugins
         run: |
-          # ডিপেন্ডেন্সি ডাউনলোড
           curl -Lo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
           curl -Lo r8.jar https://repo1.maven.org/maven2/com/android/tools/r8/8.2.33/r8-8.2.33.jar
           curl -Lo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -q kotlinc.zip
 
-          # কমন ইন্টারফেস টেমপ্লেট
           cat << 'EOF' > MainAPI_temp.kt
           package com.flixora.plugin
           data class MovieItem(val title: String, val image: String, val url: String)
@@ -42,24 +39,18 @@ jobs:
           }
           EOF
 
-          # plugins ফোল্ডারের প্রতিটি .kt ফাইল কম্পাইল ও .flx বাইনারি তৈরি
           for file in plugins/*.kt; do
             if [ -f "$file" ]; then
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
               echo "===> Processing: $baseName.kt -> $outputName.flx"
 
-              # ১. কটলিন কোড কম্পাইল
               ./kotlinc/bin/kotlinc "$file" MainAPI_temp.kt -cp jsoup.jar -include-runtime -d "${outputName}_temp.jar"
 
-              # ২. Android D8 দিয়ে ডেক্স বাইনারি তৈরি
               mkdir -p "dex_out_${outputName}"
               java -cp r8.jar com.android.tools.r8.D8 --release --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar
 
-              # ৩. classes.dex ফাইলকে .flx নামে রুট ফোল্ডারে মুভ করা
               mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
-
-              # ক্লিনআপ
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
           done
