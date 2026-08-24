@@ -1,0 +1,70 @@
+name: Build Plugins to FLX Binaries
+
+on:
+  push:
+    paths:
+      - 'plugins/**.kt'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-flx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Install Android Build-Tools & Kotlin Compiler
+        run: |
+          sudo apt-get update && sudo apt-get install -y android-sdk-build-tools
+          curl -Lo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
+          curl -Lo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
+          unzip -q kotlinc.zip
+
+      - name: Compile Each .kt to .flx Binary
+        run: |
+          # কমন ইন্টারফেস টেমপ্লেট
+          cat << 'EOF' > MainAPI_temp.kt
+          package com.flixora.plugin
+          data class MovieItem(val title: String, val image: String, val url: String)
+          abstract class MainAPI {
+              abstract var name: String
+              abstract var mainUrl: String
+              abstract suspend fun getMainPage(): List<MovieItem>
+              abstract suspend fun search(query: String): List<MovieItem>
+          }
+          EOF
+
+          # plugins ফোল্ডারের প্রতিটির জন্য .flx তৈরি এবং নাম থেকে Provider বাদ দিয়ে সেভ করা
+          for file in plugins/*.kt; do
+            if [ -f "$file" ]; then
+              baseName=$(basename "$file" .kt)
+              outputName=$(echo "$baseName" | sed 's/Provider$//')
+              echo "===> Compiling: $baseName.kt -> Root/${outputName}.flx"
+
+              # কটলিন কম্পাইল
+              ./kotlinc/bin/kotlinc "$file" MainAPI_temp.kt -cp jsoup.jar -include-runtime -d "${outputName}_temp.jar"
+
+              # Android DEX (.flx) কনভার্ট
+              d8 --output "${outputName}.flx" "${outputName}_temp.jar" jsoup.jar
+
+              rm -f "${outputName}_temp.jar"
+            fi
+          done
+          rm -f MainAPI_temp.kt
+
+      - name: Commit and Push FLX Binaries to Root
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add *.flx
+          git commit -m "Auto-compiled plugins to root .flx binaries" || exit 0
+          git push
