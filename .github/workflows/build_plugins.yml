@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -25,16 +25,23 @@ jobs:
         run: |
           set -e
           
-          # ১. ডিপেন্ডেন্সি ও টুলস ডাউনলোড
+          # প্রয়োজনীয় সব ডিপেন্ডেন্সি ডাউনলোড (Jsoup, Coroutines, R8, Kotlin)
           curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
+          curl -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.7.3/kotlinx-coroutines-core-jvm-1.7.3.jar
           curl -sLo r8.jar https://repo1.maven.org/maven2/com/android/tools/r8/8.2.33/r8-8.2.33.jar
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
-          # ২. কমন ইন্টারফেস ফাইল তৈরি
+          # কমন ইন্টারফেস তৈরি
           cat << 'EOF' > MainAPI.kt
           package com.flixora.plugin
-          data class MovieItem(val title: String, val image: String, val url: String)
+
+          data class MovieItem(
+              val title: String,
+              val image: String,
+              val url: String
+          )
+
           abstract class MainAPI {
               abstract var name: String
               abstract var mainUrl: String
@@ -43,7 +50,7 @@ jobs:
           }
           EOF
 
-          # ৩. plugins ফোল্ডার চেক ও কম্পাইল
+          # plugins ফোল্ডারের ফাইল কম্পাইল
           if [ -d "plugins" ]; then
             for file in plugins/*.kt; do
               if [ -f "$file" ]; then
@@ -51,14 +58,14 @@ jobs:
                 outputName=$(echo "$baseName" | sed 's/Provider$//')
                 echo "===> Compiling: $baseName.kt -> ${outputName}.flx"
 
-                # কটলিন কম্পাইল
-                ./kotlinc/bin/kotlinc "$file" MainAPI.kt -cp jsoup.jar -include-runtime -d "${outputName}_temp.jar"
+                # ১. কটলিন কম্পাইল
+                ./kotlinc/bin/kotlinc "$file" MainAPI.kt -cp "jsoup.jar:coroutines.jar" -include-runtime -d "${outputName}_temp.jar"
 
-                # D8 দিয়ে DEX (.flx) তৈরি
+                # ২. Android D8 দিয়ে ডেক্স বাইনারি (.flx) তৈরি
                 mkdir -p "dex_out_${outputName}"
-                java -cp r8.jar com.android.tools.r8.D8 --release --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar
+                java -cp r8.jar com.android.tools.r8.D8 --release --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar coroutines.jar
 
-                # রুট ফোল্ডারে মুভ
+                # ৩. আউটপুট .flx রুট ফোল্ডারে মুভ
                 mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
                 rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
               fi
@@ -66,12 +73,17 @@ jobs:
           fi
 
           # ক্লিনআপ
-          rm -f MainAPI.kt jsoup.jar r8.jar kotlinc.zip
+          rm -f MainAPI.kt jsoup.jar coroutines.jar r8.jar kotlinc.zip
           rm -rf kotlinc
 
       - name: Commit and Push FLX Binaries
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add *.flx
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .flx binaries" && git push)
+          if git status --porcelain | grep -E '\.flx$'; then
+            git commit -m "Auto-compiled plugins to .flx binaries"
+            git push
+          else
+            echo "No new .flx files to commit."
+          fi
