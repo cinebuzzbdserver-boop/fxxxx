@@ -133,7 +133,7 @@ class CineFreakProvider : MainAPI() {
 
     private fun resolveDirectStreamLink(quality: String, generateUrl: String): StreamItem? {
         try {
-            // ১. Generate പേজ রিকোয়েস্ট করে window.location.href লিংক পার্স করা
+            // ১. Generate പേজ রিকোৎযয়েস্ট করে window.location.href লিংক পার্স করা
             val genDoc = Jsoup.connect(generateUrl)
                 .userAgent(userAgent)
                 .referrer(mainUrl)
