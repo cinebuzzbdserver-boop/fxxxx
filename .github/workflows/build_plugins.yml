@@ -21,10 +21,9 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Download Compiler & Dependencies
+      - name: Download Compiler & Jsoup
         run: |
           curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
-          curl -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
@@ -58,8 +57,7 @@ jobs:
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
-                -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
-                -include-runtime \
+                -cp "jsoup.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
               mkdir -p "dex_out_${outputName}"
@@ -70,7 +68,7 @@ jobs:
             fi
           done
 
-          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar
+          rm -rf src kotlinc kotlinc.zip jsoup.jar
 
       - name: Commit and Push FLX Binaries
         run: |
