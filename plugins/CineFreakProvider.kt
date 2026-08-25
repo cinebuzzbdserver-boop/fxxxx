@@ -69,7 +69,7 @@ class CineFreakProvider : MainAPI() {
                             title = title,
                             image = image,
                             url = url,
-                            imageSize = "2:3"
+                            imageSize = "2:3" // p
                         )
                     )
                 }
