@@ -5,7 +5,7 @@
       "id": "cinefreak",
       "name": "CineFreak",
       "version": 1,
-      "status": 1,
+      "status": 2,
       "entryClass": "com.flixora.providers.CineFreakProvider",
       "downloadUrl": "https://raw.githubusercontent.com/cinebuzzbdserver-boop/fxxxx/main/CineFreak.flx"
     }
