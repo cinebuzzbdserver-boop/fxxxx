@@ -45,7 +45,8 @@ class MMSVibeXProvider : MainAPI() {
                     ?: anchor?.attr("title")?.trim()
                     ?: ""
 
-                if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
+                // 'actors=' প্যারামিটার থাকলে সেই লিংক ইগনোর করা হবে
+                if (title.isNotEmpty() && rawUrl.isNotEmpty() && !fullUrl.contains("actors=")) {
                     list.add(
                         MovieItem(
                             title = title,
@@ -87,7 +88,8 @@ class MMSVibeXProvider : MainAPI() {
                     ?: anchor?.attr("title")?.trim()
                     ?: ""
 
-                if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
+                // 'actors=' প্যারামিটার থাকলে সেই লিংক ইগনোর করা হবে
+                if (title.isNotEmpty() && rawUrl.isNotEmpty() && !fullUrl.contains("actors=")) {
                     list.add(
                         MovieItem(
                             title = title,
