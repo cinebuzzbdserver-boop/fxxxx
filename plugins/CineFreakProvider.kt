@@ -8,31 +8,38 @@ class CineFreakProvider : MainAPI() {
     override var name = "CineFreak"
     override var mainUrl = "https://cinefreak.nl"
 
-    override suspend fun getMainPage(): List<MovieItem> {
+    override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
-            val doc = Jsoup.connect(mainUrl)
+            val targetUrl = if (page <= 1) {
+                mainUrl
+            } else {
+                "$mainUrl/page/$page/"
+            }
+
+            val doc = Jsoup.connect(targetUrl)
                 .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                 .timeout(15000)
                 .get()
 
-            // এইচটিএমএল কার্ডগুলো সিলেক্ট করা
             val cards = doc.select("a.movie-card")
 
             for (card in cards) {
-                // ১. পোস্টের ইউআরএল
                 val url = card.attr("href").trim()
-
-                // ২. পোস্টের থাম্বনেইল ইমেজ
                 val imgElement = card.selectFirst(".movie-card-image img")
                 val image = imgElement?.attr("src")?.trim() ?: ""
-
-                // ৩. মুভি/সিরিজের টাইটেল
                 val titleElement = card.selectFirst(".movie-card-content .movie-card-title")
                 val title = titleElement?.text()?.trim() ?: ""
 
                 if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(MovieItem(title = title, image = image, url = url))
+                    list.add(
+                        MovieItem(
+                            title = title,
+                            image = image,
+                            url = url,
+                            imageSize = "2:3" // হার্ডকোড করা সাইজ
+                        )
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -57,7 +64,14 @@ class CineFreakProvider : MainAPI() {
                 val title = card.selectFirst(".movie-card-content .movie-card-title")?.text()?.trim() ?: ""
 
                 if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(MovieItem(title = title, image = image, url = url))
+                    list.add(
+                        MovieItem(
+                            title = title,
+                            image = image,
+                            url = url,
+                            imageSize = "2:3" // হার্ডকোড করা সাইজ
+                        )
+                    )
                 }
             }
         } catch (e: Exception) {
