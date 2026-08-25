@@ -51,7 +51,7 @@ jobs:
 
           data class EpisodeItem(
               val name: String,
-              val streamLinks: List<StreamItem>
+              val rawGenerateLinks: List<Pair<String, String>>
           )
 
           data class SeasonItem(
@@ -59,9 +59,9 @@ jobs:
               val episodes: List<EpisodeItem>
           )
 
-          data class MediaDetails(
+          data class MediaStructure(
               val isSeries: Boolean,
-              val movieLinks: List<StreamItem>,
+              val rawMovieLinks: List<Pair<String, String>>,
               val seasons: List<SeasonItem>
           )
 
@@ -71,8 +71,11 @@ jobs:
               abstract suspend fun getMainPage(page: Int): List<MovieItem>
               abstract suspend fun search(query: String): List<MovieItem>
               abstract suspend fun loadLinks(postUrl: String): List<StreamItem>
-              open suspend fun loadMedia(postUrl: String): MediaDetails {
-                  return MediaDetails(isSeries = false, movieLinks = loadLinks(postUrl), seasons = emptyList())
+              open suspend fun loadMediaStructure(postUrl: String): MediaStructure {
+                  return MediaStructure(isSeries = false, rawMovieLinks = emptyList(), seasons = emptyList())
+              }
+              open suspend fun resolveDirectLink(generateUrl: String): String? {
+                  return null
               }
           }
           EOF
