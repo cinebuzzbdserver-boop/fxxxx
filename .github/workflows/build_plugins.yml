@@ -1,77 +1,82 @@
-name: Build Plugins to FLX Binaries
+package com.flixora.providers
 
-on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
+import com.flixora.plugin.MainAPI
+import com.flixora.plugin.MovieItem
+import org.jsoup.Jsoup
 
-permissions:
-  contents: write
+class CineFreakProvider : MainAPI() {
+    override var name = "CineFreak"
+    override var mainUrl = "https://cinefreak.nl"
 
-jobs:
-  build-flx:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+    override suspend fun getMainPage(page: Int): List<MovieItem> {
+        val list = mutableListOf<MovieItem>()
+        try {
+            val targetUrl = if (page <= 1) {
+                mainUrl
+            } else {
+                "$mainUrl/page/$page/"
+            }
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+            val doc = Jsoup.connect(targetUrl)
+                .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(15000)
+                .get()
 
-      - name: Download Compiler & Jsoup
-        run: |
-          curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
-          curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
-          unzip -qo kotlinc.zip
+            val cards = doc.select("a.movie-card")
 
-      - name: Build Plugins to FLX
-        run: |
-          ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
-          D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
+            for (card in cards) {
+                val url = card.attr("href").trim()
+                val imgElement = card.selectFirst(".movie-card-image img")
+                val image = imgElement?.attr("src")?.trim() ?: ""
+                val titleElement = card.selectFirst(".movie-card-content .movie-card-title")
+                val title = titleElement?.text()?.trim() ?: ""
 
-          mkdir -p src/com/flixora/plugin
-          cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
-          package com.flixora.plugin
+                if (title.isNotEmpty() && url.isNotEmpty()) {
+                    list.add(
+                        MovieItem(
+                            title = title,
+                            image = image,
+                            url = url,
+                            imageSize = "2:3"
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
 
-          data class MovieItem(
-              val title: String,
-              val image: String,
-              val url: String
-          )
+    override suspend fun search(query: String): List<MovieItem> {
+        val list = mutableListOf<MovieItem>()
+        try {
+            val searchUrl = "$mainUrl/?s=${query.trim().replace(" ", "+")}"
+            val doc = Jsoup.connect(searchUrl)
+                .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .timeout(15000)
+                .get()
 
-          abstract class MainAPI {
-              abstract var name: String
-              abstract var mainUrl: String
-              abstract suspend fun getMainPage(): List<MovieItem>
-              abstract suspend fun search(query: String): List<MovieItem>
-          }
-          EOF
+            val cards = doc.select("a.movie-card")
+            for (card in cards) {
+                val url = card.attr("href").trim()
+                val image = card.selectFirst(".movie-card-image img")?.attr("src")?.trim() ?: ""
+                val title = card.selectFirst(".movie-card-content .movie-card-title")?.text()?.trim() ?: ""
 
-          for file in plugins/*.kt; do
-            if [ -f "$file" ]; then
-              baseName=$(basename "$file" .kt)
-              outputName=$(echo "$baseName" | sed 's/Provider$//')
-
-              ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
-                -cp "jsoup.jar:$ANDROID_JAR" \
-                -d "${outputName}_temp.jar"
-
-              mkdir -p "dex_out_${outputName}"
-              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --lib jsoup.jar --output "dex_out_${outputName}" "${outputName}_temp.jar"
-
-              mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
-              rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
-            fi
-          done
-
-          rm -rf src kotlinc kotlinc.zip jsoup.jar
-
-      - name: Commit and Push FLX Binaries
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.flx
-          git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .flx binaries" && git push)
+                if (title.isNotEmpty() && url.isNotEmpty()) {
+                    list.add(
+                        MovieItem(
+                            title = title,
+                            image = image,
+                            url = url,
+                            imageSize = "2:3"
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return list
+    }
+}
