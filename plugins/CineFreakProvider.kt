@@ -2,13 +2,10 @@ package com.flixora.providers
 
 import com.flixora.plugin.EpisodeItem
 import com.flixora.plugin.MainAPI
-import com.flixora.plugin.MediaDetails
+import com.flixora.plugin.MediaStructure
 import com.flixora.plugin.MovieItem
 import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 
 class CineFreakProvider : MainAPI() {
@@ -90,14 +87,10 @@ class CineFreakProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(postUrl: String): List<StreamItem> {
-        val details = loadMedia(postUrl)
-        if (!details.isSeries) {
-            return details.movieLinks
-        }
-        return details.seasons.firstOrNull()?.episodes?.firstOrNull()?.streamLinks ?: emptyList()
+        return emptyList()
     }
 
-    override suspend fun loadMedia(postUrl: String): MediaDetails = coroutineScope {
+    override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         try {
             val doc = Jsoup.connect(postUrl)
                 .userAgent(userAgent)
@@ -105,98 +98,79 @@ class CineFreakProvider : MainAPI() {
                 .get()
 
             val epCards = doc.select(".episode-grid .ep-card")
-            val comboBoxes = doc.select(".quality-box")
 
-            // ১. যদি সিরিজ / টিভি শো পাওয়া যায়
+            // ১. সিরিজ বা টিভি শো থাকলে শুধুমাত্র download-links নেওয়া হবে
             if (epCards.isNotEmpty() || doc.selectFirst(".season-number") != null) {
                 val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
 
-                // এ) সিঙ্গেল এপিসোড কার্ডসমূহ পার্স করা
+                // সিঙ্গেল এপিসোড পার্সিং
                 for (card in epCards) {
                     val seasonName = card.selectFirst(".season-number")?.text()?.trim()?.ifEmpty { null } ?: "Season 1"
                     val epBadge = card.selectFirst(".episode-badge")?.text()?.trim() ?: ""
                     val epTitle = if (epBadge.isNotEmpty()) epBadge else (card.selectFirst(".ep-title")?.text()?.trim() ?: "Episode")
 
-                    // Watch Box থেকে লিংক সংগ্রহ
-                    val watchBox = card.selectFirst(".quality-box.watch-links") ?: card.selectFirst(".quality-box.download-links")
-                    val links = watchBox?.select(".quality-grid a") ?: card.select(".quality-grid a")
+                    // কঠোরভাবে শুধুমাত্র .quality-box.download-links টার্গেট
+                    val downloadBox = card.selectFirst(".quality-box.download-links")
+                    val links = downloadBox?.select(".quality-grid a") ?: emptyList()
 
-                    val rawTasks = mutableListOf<Pair<String, String>>()
+                    val rawLinks = mutableListOf<Pair<String, String>>()
                     for (link in links) {
                         val quality = link.text().trim()
                         val relPath = link.attr("href").trim()
                         if (relPath.isNotEmpty()) {
-                            val fullGenUrl = if (relPath.startsWith("http")) relPath else "$mainUrl$relPath"
-                            rawTasks.add(Pair(quality, fullGenUrl))
+                            val fullUrl = if (relPath.startsWith("http")) relPath else "$mainUrl$relPath"
+                            rawLinks.add(Pair(quality, fullUrl))
                         }
                     }
 
-                    val deferredStreams = rawTasks.map { (quality, genUrl) ->
-                        async { resolveDirectStreamLink(quality, genUrl) }
-                    }
-                    val streams = deferredStreams.awaitAll().filterNotNull()
-
-                    if (streams.isNotEmpty()) {
+                    if (rawLinks.isNotEmpty()) {
                         val epList = seasonMap.getOrPut(seasonName) { mutableListOf() }
-                        epList.add(EpisodeItem(name = epTitle, streamLinks = streams))
+                        epList.add(EpisodeItem(name = epTitle, rawGenerateLinks = rawLinks))
                     }
                 }
 
-                // বি) মার্চ করা সিজন বক্স (যদি সিঙ্গেল এপিসোড ছাড়া সরাসরি সিজন প্যাক কম্বো থাকে)
+                // ফুল সিজন কম্বো পার্সিং (যদি সিঙ্গেল এপিসোড না থাকে)
                 if (seasonMap.isEmpty()) {
-                    val comboDl = doc.selectFirst(".quality-box.watch-links") ?: doc.selectFirst(".quality-box.download-links")
+                    val comboDl = doc.selectFirst(".quality-box.download-links")
                     val links = comboDl?.select(".quality-grid a") ?: emptyList()
 
-                    val rawTasks = mutableListOf<Pair<String, String>>()
+                    val rawLinks = mutableListOf<Pair<String, String>>()
                     for (link in links) {
                         val quality = link.text().trim()
                         val relPath = link.attr("href").trim()
                         if (relPath.isNotEmpty()) {
-                            val fullGenUrl = if (relPath.startsWith("http")) relPath else "$mainUrl$relPath"
-                            rawTasks.add(Pair(quality, fullGenUrl))
+                            val fullUrl = if (relPath.startsWith("http")) relPath else "$mainUrl$relPath"
+                            rawLinks.add(Pair(quality, fullUrl))
                         }
                     }
 
-                    val deferredStreams = rawTasks.map { (quality, genUrl) ->
-                        async { resolveDirectStreamLink(quality, genUrl) }
-                    }
-                    val streams = deferredStreams.awaitAll().filterNotNull()
-
-                    if (streams.isNotEmpty()) {
+                    if (rawLinks.isNotEmpty()) {
                         val seasonName = doc.selectFirst(".season-number")?.text()?.trim()?.ifEmpty { null } ?: "Season 1"
-                        seasonMap[seasonName] = mutableListOf(EpisodeItem(name = "Full Season", streamLinks = streams))
+                        seasonMap[seasonName] = mutableListOf(EpisodeItem(name = "Full Season", rawGenerateLinks = rawLinks))
                     }
                 }
 
-                val seasonsList = seasonMap.map { (sName, epList) ->
-                    SeasonItem(name = sName, episodes = epList)
-                }
-
+                val seasonsList = seasonMap.map { (sName, epList) -> SeasonItem(name = sName, episodes = epList) }
                 if (seasonsList.isNotEmpty()) {
-                    return@coroutineScope MediaDetails(
-                        isSeries = true,
-                        movieLinks = emptyList(),
-                        seasons = seasonsList
-                    )
+                    return MediaStructure(isSeries = true, rawMovieLinks = emptyList(), seasons = seasonsList)
                 }
             }
 
             // ২. সাধারণ মুভি স্ট্রাকচার পার্সিং
             val downloadDiv = doc.selectFirst(".download-links-div")
             val titles = downloadDiv?.select("h4.movie-title") ?: emptyList()
-            val rawTasks = mutableListOf<Pair<String, String>>()
+            val rawMovieLinks = mutableListOf<Pair<String, String>>()
 
             for (titleElement in titles) {
                 val qualityText = titleElement.text().trim()
                 var sibling = titleElement.nextElementSibling()
-
                 while (sibling != null && !sibling.tagName().equals("h4", ignoreCase = true)) {
                     if (sibling.hasClass("dlbtn-container")) {
                         val downloadBtn = sibling.selectFirst("a.dlbtn-download")
                         val genUrl = downloadBtn?.attr("href")?.trim() ?: ""
                         if (genUrl.isNotEmpty()) {
-                            val fullGenUrl = if (genUrl.startsWith("http")) genUrl else "$mainUrl$genUrl"
-                            rawTasks.add(Pair(qualityText, fullGenUrl))
+                            val fullUrl = if (genUrl.startsWith("http")) genUrl else "$mainUrl$genUrl"
+                            rawMovieLinks.add(Pair(qualityText, fullUrl))
                             break
                         }
                     }
@@ -204,25 +178,16 @@ class CineFreakProvider : MainAPI() {
                 }
             }
 
-            val deferredResults = rawTasks.map { (quality, generateUrl) ->
-                async { resolveDirectStreamLink(quality, generateUrl) }
-            }
-
-            val results = deferredResults.awaitAll().filterNotNull()
-            return@coroutineScope MediaDetails(
-                isSeries = false,
-                movieLinks = results,
-                seasons = emptyList()
-            )
+            return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return@coroutineScope MediaDetails(isSeries = false, movieLinks = emptyList(), seasons = emptyList())
+        return MediaStructure(isSeries = false, rawMovieLinks = emptyList(), seasons = emptyList())
     }
 
-    private fun resolveDirectStreamLink(quality: String, generateUrl: String): StreamItem? {
+    override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // ১. Generate পেজ রিকোয়েস্ট করে window.location.href লিংক পার্স করা
+            // ১. Generate পেজ রিকোয়েস্ট করে window.location.href লিংক বের করা
             val genDoc = Jsoup.connect(generateUrl)
                 .userAgent(userAgent)
                 .referrer(mainUrl)
@@ -234,14 +199,14 @@ class CineFreakProvider : MainAPI() {
             val match = locationRegex.find(htmlContent)
             val intermediateUrl = match?.groupValues?.get(1)?.trim() ?: return null
 
-            // ২. /f/ অথবা /x/ পাথকে /d/ পাথে রূপান্তর করা
+            // ২. /f/ অথবা /x/ পাথকে /d/ পাথে রূপান্তর
             val downloadPageUrl = when {
                 intermediateUrl.contains("/f/") -> intermediateUrl.replace("/f/", "/d/")
                 intermediateUrl.contains("/x/") -> intermediateUrl.replace("/x/", "/d/")
                 else -> intermediateUrl
             }
 
-            // ৩. /d/ পেজে রিকোয়েস্ট পাঠিয়ে Cloudflare R2 ডিরেক্ট লিংক পার্স করা
+            // ৩. /d/ পেজে রিকোয়েস্ট পাঠিয়ে Cloudflare R2 ডিরেক্ট স্ট্রিম লিংক বের করা
             val dlDoc = Jsoup.connect(downloadPageUrl)
                 .userAgent(userAgent)
                 .referrer(generateUrl)
@@ -252,10 +217,7 @@ class CineFreakProvider : MainAPI() {
             val directStreamUrl = directLinkElement?.attr("href")?.trim() ?: ""
 
             if (directStreamUrl.isNotEmpty()) {
-                return StreamItem(
-                    quality = quality,
-                    streamUrl = directStreamUrl
-                )
+                return directStreamUrl
             }
         } catch (e: Exception) {
             e.printStackTrace()
