@@ -21,9 +21,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Download Compiler & Jsoup
+      - name: Download Compiler & Dependencies
         run: |
           curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
+          curl -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
@@ -40,14 +41,20 @@ jobs:
               val title: String,
               val image: String,
               val url: String,
-              val imageSize: String = "2:3"
+              val imageSize: String
+          )
+
+          data class StreamItem(
+              val quality: String,
+              val streamUrl: String
           )
 
           abstract class MainAPI {
               abstract var name: String
               abstract var mainUrl: String
-              abstract suspend fun getMainPage(page: Int = 1): List<MovieItem>
+              abstract suspend fun getMainPage(page: Int): List<MovieItem>
               abstract suspend fun search(query: String): List<MovieItem>
+              abstract suspend fun loadLinks(postUrl: String): List<StreamItem>
           }
           EOF
 
@@ -57,18 +64,18 @@ jobs:
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
-                -cp "jsoup.jar:$ANDROID_JAR" \
+                -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
               mkdir -p "dex_out_${outputName}"
-              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --lib jsoup.jar --output "dex_out_${outputName}" "${outputName}_temp.jar"
+              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --lib jsoup.jar --lib coroutines.jar --output "dex_out_${outputName}" "${outputName}_temp.jar"
 
               mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
           done
 
-          rm -rf src kotlinc kotlinc.zip jsoup.jar
+          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar
 
       - name: Commit and Push FLX Binaries
         run: |
