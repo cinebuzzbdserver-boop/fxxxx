@@ -49,12 +49,31 @@ jobs:
               val streamUrl: String
           )
 
+          data class EpisodeItem(
+              val name: String,
+              val streamLinks: List<StreamItem>
+          )
+
+          data class SeasonItem(
+              val name: String,
+              val episodes: List<EpisodeItem>
+          )
+
+          data class MediaDetails(
+              val isSeries: Boolean,
+              val movieLinks: List<StreamItem>,
+              val seasons: List<SeasonItem>
+          )
+
           abstract class MainAPI {
               abstract var name: String
               abstract var mainUrl: String
               abstract suspend fun getMainPage(page: Int): List<MovieItem>
               abstract suspend fun search(query: String): List<MovieItem>
               abstract suspend fun loadLinks(postUrl: String): List<StreamItem>
+              open suspend fun loadMedia(postUrl: String): MediaDetails {
+                  return MediaDetails(isSeries = false, movieLinks = loadLinks(postUrl), seasons = emptyList())
+              }
           }
           EOF
 
