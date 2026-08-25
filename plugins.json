@@ -8,14 +8,6 @@
       "status": 1,
       "entryClass": "com.flixora.providers.CineFreakProvider",
       "downloadUrl": "https://raw.githubusercontent.com/cinebuzzbdserver-boop/fxxxx/main/CineFreak.flx"
-    },
-    {
-      "id": "fibwatch",
-      "name": "Fibwatch",
-      "version": 1,
-      "status": 0,
-      "entryClass": "com.flixora.providers.FibwatchProvider",
-      "downloadUrl": "https://raw.githubusercontent.com/cinebuzzbdserver-boop/fxxxx/main/Fibwatch.flx"
     }
   ]
 }
