@@ -29,14 +29,9 @@ jobs:
 
       - name: Build Plugins to FLX
         run: |
-          # রানারে থাকা প্রি-ইনস্টল্ড অ্যান্ড্রয়েড প্ল্যাটফর্ম এবং d8 পাথ
           ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
           D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
 
-          echo "Using Android Jar: $ANDROID_JAR"
-          echo "Using D8 Tool: $D8_TOOL"
-
-          # কমন ইন্টারফেস
           mkdir -p src/com/flixora/plugin
           cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
           package com.flixora.plugin
@@ -55,23 +50,18 @@ jobs:
           }
           EOF
 
-          # কম্পাইল ও ডেক্সিং
           for file in plugins/*.kt; do
             if [ -f "$file" ]; then
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
-              echo "===> Processing: $baseName.kt -> $outputName.flx"
 
-              # ১. কটলিন কম্পাইল
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
                 -cp "jsoup.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
-              # ২. প্রি-ইনস্টল্ড D8 দিয়ে ডেক্স বাইনারি তৈরি
               mkdir -p "dex_out_${outputName}"
-              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --output "dex_out_${outputName}" "${outputName}_temp.jar" jsoup.jar
+              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --lib jsoup.jar --output "dex_out_${outputName}" "${outputName}_temp.jar"
 
-              # ৩. classes.dex ফাইলকে .flx হিসেবে মুভ করা
               mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
