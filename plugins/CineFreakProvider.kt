@@ -56,11 +56,11 @@ class CineFreakProvider : MainAPI() {
         return list
     }
 
-    override suspend fun search(query: String): List<MovieItem> {
+    override suspend fun search(query: String, page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-            val searchApiUrl = "$mainUrl/search-api.php?q=$encodedQuery&pg=1"
+            val searchApiUrl = "$mainUrl/search-api.php?q=$encodedQuery&pg=$page"
 
             val response = Jsoup.connect(searchApiUrl)
                 .userAgent(userAgent)
@@ -77,7 +77,6 @@ class CineFreakProvider : MainAPI() {
                 for (i in 0 until resultsArray.length()) {
                     val item = resultsArray.optJSONObject(i) ?: continue
 
-                    // t = title, l = slug/link, i = image
                     val title = item.optString("t", "").trim()
                     val slug = item.optString("l", "").trim()
                     val image = item.optString("i", "").trim()
