@@ -85,10 +85,12 @@ jobs:
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
+              # Compile Kotlin Sources to a Jar
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
                 -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
+              # Run D8 to convert bytecode into classes.dex
               mkdir -p "dex_out_${outputName}"
               $D8_TOOL --release --min-api 21 \
                 --lib "$ANDROID_JAR" \
