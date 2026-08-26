@@ -6,7 +6,10 @@ import com.flixora.plugin.MediaStructure
 import com.flixora.plugin.MovieItem
 import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
+import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.Jsoup
+import java.net.URLEncoder
 
 class CineFreakProvider : MainAPI() {
     override var name = "CineFreak"
@@ -57,27 +60,57 @@ class CineFreakProvider : MainAPI() {
     override suspend fun search(query: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
-            val searchUrl = "$mainUrl/?s=${query.trim().replace(" ", "+")}"
-            val doc = Jsoup.connect(searchUrl)
+            val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+            val searchApiUrl = "$mainUrl/wp-json/dooplay/search/?keyword=$encodedQuery&nonce="
+
+            val response = Jsoup.connect(searchApiUrl)
                 .userAgent(userAgent)
+                .referrer(mainUrl)
+                .ignoreContentType(true)
                 .timeout(15000)
-                .get()
+                .execute()
 
-            val cards = doc.select("a.movie-card")
-            for (card in cards) {
-                val url = card.attr("href").trim()
-                val image = card.selectFirst(".movie-card-image img")?.attr("src")?.trim() ?: ""
-                val title = card.selectFirst(".movie-card-content .movie-card-title")?.text()?.trim() ?: ""
+            val jsonStr = response.body().trim()
 
-                if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(
-                        MovieItem(
-                            title = title,
-                            image = image,
-                            url = url,
-                            imageSize = "2:3"
+            if (jsonStr.startsWith("{")) {
+                val jsonObject = JSONObject(jsonStr)
+                val keys = jsonObject.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val item = jsonObject.optJSONObject(key) ?: continue
+                    val title = item.optString("title", "").trim()
+                    val url = item.optString("url", "").trim()
+                    val image = item.optString("img", "").trim()
+
+                    if (title.isNotEmpty() && url.isNotEmpty()) {
+                        list.add(
+                            MovieItem(
+                                title = title,
+                                image = image,
+                                url = url,
+                                imageSize = "2:3"
+                            )
                         )
-                    )
+                    }
+                }
+            } else if (jsonStr.startsWith("[")) {
+                val jsonArray = JSONArray(jsonStr)
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.optJSONObject(i) ?: continue
+                    val title = item.optString("title", "").trim()
+                    val url = item.optString("url", "").trim()
+                    val image = item.optString("img", "").trim()
+
+                    if (title.isNotEmpty() && url.isNotEmpty()) {
+                        list.add(
+                            MovieItem(
+                                title = title,
+                                image = image,
+                                url = url,
+                                imageSize = "2:3"
+                            )
+                        )
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -99,17 +132,14 @@ class CineFreakProvider : MainAPI() {
 
             val epCards = doc.select(".episode-grid .ep-card")
 
-            // ১. সিরিজ বা টিভি শো থাকলে শুধুমাত্র download-links নেওয়া হবে
             if (epCards.isNotEmpty() || doc.selectFirst(".season-number") != null) {
                 val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
 
-                // সিঙ্গেল এপিসোড পার্সিং
                 for (card in epCards) {
                     val seasonName = card.selectFirst(".season-number")?.text()?.trim()?.ifEmpty { null } ?: "Season 1"
                     val epBadge = card.selectFirst(".episode-badge")?.text()?.trim() ?: ""
                     val epTitle = if (epBadge.isNotEmpty()) epBadge else (card.selectFirst(".ep-title")?.text()?.trim() ?: "Episode")
 
-                    // শুধুমাত্র .quality-box.download-links টার্গেট
                     val downloadBox = card.selectFirst(".quality-box.download-links")
                     val links = downloadBox?.select(".quality-grid a") ?: emptyList()
 
@@ -129,7 +159,6 @@ class CineFreakProvider : MainAPI() {
                     }
                 }
 
-                // ফুল সিজন কম্বো পার্সিং (যদি সিঙ্গেল এপিসোড না থাকে)
                 if (seasonMap.isEmpty()) {
                     val comboDl = doc.selectFirst(".quality-box.download-links")
                     val links = comboDl?.select(".quality-grid a") ?: emptyList()
@@ -156,7 +185,6 @@ class CineFreakProvider : MainAPI() {
                 }
             }
 
-            // ২. সাধারণ মুভি স্ট্রাকচার পার্সিং
             val downloadDiv = doc.selectFirst(".download-links-div")
             val titles = downloadDiv?.select("h4.movie-title") ?: emptyList()
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
@@ -187,7 +215,6 @@ class CineFreakProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // ১. Generate পেজ রিকোয়েস্ট করে window.location.href লিংক বের করা
             val genDoc = Jsoup.connect(generateUrl)
                 .userAgent(userAgent)
                 .referrer(mainUrl)
@@ -199,14 +226,12 @@ class CineFreakProvider : MainAPI() {
             val match = locationRegex.find(htmlContent)
             val intermediateUrl = match?.groupValues?.get(1)?.trim() ?: return null
 
-            // ২. /f/ অথবা /x/ পাথকে /d/ পাথে রূপান্তর
             val downloadPageUrl = when {
                 intermediateUrl.contains("/f/") -> intermediateUrl.replace("/f/", "/d/")
                 intermediateUrl.contains("/x/") -> intermediateUrl.replace("/x/", "/d/")
                 else -> intermediateUrl
             }
 
-            // ৩. /d/ পেজে রিকোয়েস্ট পাঠিয়ে Cloudflare R2 ডিরেক্ট স্ট্রিম লিংক বের করা
             val dlDoc = Jsoup.connect(downloadPageUrl)
                 .userAgent(userAgent)
                 .referrer(generateUrl)
