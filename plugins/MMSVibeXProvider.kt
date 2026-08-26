@@ -7,6 +7,7 @@ import com.flixora.plugin.MovieItem
 import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
 import org.jsoup.Jsoup
+import java.net.URLEncoder
 
 class MMSVibeXProvider : MainAPI() {
     override var name = "MMSVibeX"
@@ -45,7 +46,6 @@ class MMSVibeXProvider : MainAPI() {
                     ?: anchor?.attr("title")?.trim()
                     ?: ""
 
-                // 'actors=' প্যারামিটার থাকলে সেই লিংক ইগনোর করা হবে
                 if (title.isNotEmpty() && rawUrl.isNotEmpty() && !fullUrl.contains("actors=")) {
                     list.add(
                         MovieItem(
@@ -64,15 +64,26 @@ class MMSVibeXProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<MovieItem> {
+        return search(query, 1)
+    }
+
+    override suspend fun search(query: String, page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
-            val searchUrl = "$mainUrl/?s=${query.trim().replace(" ", "+")}"
+            val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+            val searchUrl = if (page <= 1) {
+                "$mainUrl/?s=$encodedQuery"
+            } else {
+                "$mainUrl/page/$page/?s=$encodedQuery"
+            }
+
             val doc = Jsoup.connect(searchUrl)
                 .userAgent(userAgent)
                 .timeout(15000)
                 .get()
 
             val articles = doc.select("article.thumb-block")
+
             for (article in articles) {
                 val anchor = article.selectFirst("a[href]")
                 val rawUrl = anchor?.attr("href")?.trim() ?: ""
@@ -88,7 +99,6 @@ class MMSVibeXProvider : MainAPI() {
                     ?: anchor?.attr("title")?.trim()
                     ?: ""
 
-                // 'actors=' প্যারামিটার থাকলে সেই লিংক ইগনোর করা হবে
                 if (title.isNotEmpty() && rawUrl.isNotEmpty() && !fullUrl.contains("actors=")) {
                     list.add(
                         MovieItem(
@@ -119,11 +129,9 @@ class MMSVibeXProvider : MainAPI() {
                 .timeout(15000)
                 .get()
 
-            // ১. HTML5 <video><source src="..."> থেকে সরাসরি ভিডিও লিংক এক্সট্র্যাক্ট করা
             val videoSource = doc.selectFirst(".video-player video source, video#wpst-video source")
             var videoUrl = videoSource?.attr("src")?.trim() ?: ""
 
-            // ২. Fallback: যদি source এ না পাওয়া যায় তবে meta ট্যাগ থেকে রিট্রিভ করা
             if (videoUrl.isEmpty()) {
                 val metaContent = doc.selectFirst("meta[itemprop='contentURL']")
                 videoUrl = metaContent?.attr("content")?.trim() ?: ""
