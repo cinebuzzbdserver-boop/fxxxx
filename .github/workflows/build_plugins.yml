@@ -30,8 +30,9 @@ jobs:
 
       - name: Build Plugins to FLX
         run: |
-          ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
-          D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          ANDROID_JAR=$(find "$ANDROID_SDK_ROOT/platforms" -name "android.jar" | head -n 1)
+          D8_TOOL=$(find "$ANDROID_SDK_ROOT/build-tools" -name "d8" -executable | head -n 1)
 
           mkdir -p src/com/flixora/plugin
           cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
@@ -85,24 +86,25 @@ jobs:
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
-              # Compile Kotlin Sources to a Jar
+              mkdir -p "classes_${outputName}"
+
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
                 -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
-                -d "${outputName}_temp.jar"
+                -d "classes_${outputName}"
 
-              # Run D8 to convert bytecode into classes.dex
               mkdir -p "dex_out_${outputName}"
+              
+              CLASS_FILES=$(find "classes_${outputName}" -name "*.class")
+              
               $D8_TOOL --release --min-api 21 \
-                --lib "$ANDROID_JAR" \
-                --lib jsoup.jar \
-                --lib coroutines.jar \
                 --output "dex_out_${outputName}" \
-                "${outputName}_temp.jar"
+                $CLASS_FILES
 
               if [ -f "dex_out_${outputName}/classes.dex" ]; then
                 mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
               fi
-              rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
+              
+              rm -rf "classes_${outputName}" "dex_out_${outputName}"
             fi
           done
 
