@@ -55,6 +55,10 @@ class CineFreakProvider : MainAPI() {
         return list
     }
 
+    override suspend fun search(query: String): List<MovieItem> {
+        return search(query, 1)
+    }
+
     override suspend fun search(query: String, page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
@@ -70,6 +74,7 @@ class CineFreakProvider : MainAPI() {
 
             val rawJson = response.body().trim()
 
+            // Pure Regex Parsing (No External Dependency)
             val blockRegex = Regex("""\{"t":"(.*?)","l":"(.*?)".*?"i":"(.*?)".*?\}""")
             val matches = blockRegex.findAll(rawJson)
 
