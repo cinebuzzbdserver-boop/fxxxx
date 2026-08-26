@@ -70,47 +70,25 @@ class CineFreakProvider : MainAPI() {
                 .timeout(15000)
                 .execute()
 
-            val jsonStr = response.body().trim()
+            val responseBody = response.body().trim()
 
-            if (jsonStr.startsWith("[")) {
-                val jsonArray = JSONArray(jsonStr)
-                for (i in 0 until jsonArray.length()) {
-                    val item = jsonArray.optJSONObject(i) ?: continue
-                    val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
-                    var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
-                    val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
+            // ১. যদি রেসপন্স HTML হয় (অধিকাংশ ক্ষেত্রে search-api.php সরাসরি HTML পাঠায়)
+            if (responseBody.contains("<a") || responseBody.contains("<div")) {
+                val doc = Jsoup.parse(responseBody)
+                val cards = doc.select("a.movie-card, a")
+
+                for (card in cards) {
+                    var url = card.attr("href").trim()
+                    val imgElement = card.selectFirst(".movie-card-image img, img")
+                    val image = imgElement?.attr("src")?.trim() ?: imgElement?.attr("data-src")?.trim() ?: ""
+                    val titleElement = card.selectFirst(".movie-card-content .movie-card-title, .movie-card-title, .title, h2, h3")
+                    val title = titleElement?.text()?.trim() ?: card.attr("title").trim()
 
                     if (title.isNotEmpty() && url.isNotEmpty()) {
                         if (!url.startsWith("http")) {
                             url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
                         }
-                        list.add(
-                            MovieItem(
-                                title = title,
-                                image = image,
-                                url = url,
-                                imageSize = "2:3"
-                            )
-                        )
-                    }
-                }
-            } else if (jsonStr.startsWith("{")) {
-                val jsonObject = JSONObject(jsonStr)
-                val resultsArray = jsonObject.optJSONArray("results") 
-                    ?: jsonObject.optJSONArray("data") 
-                    ?: jsonObject.optJSONArray("items")
-
-                if (resultsArray != null) {
-                    for (i in 0 until resultsArray.length()) {
-                        val item = resultsArray.optJSONObject(i) ?: continue
-                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
-                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
-                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
-
-                        if (title.isNotEmpty() && url.isNotEmpty()) {
-                            if (!url.startsWith("http")) {
-                                url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
-                            }
+                        if (list.none { it.url == url }) {
                             list.add(
                                 MovieItem(
                                     title = title,
@@ -121,27 +99,63 @@ class CineFreakProvider : MainAPI() {
                             )
                         }
                     }
-                } else {
-                    val keys = jsonObject.keys()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        val item = jsonObject.optJSONObject(key) ?: continue
-                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
-                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
-                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
+                }
+            } else if (responseBody.startsWith("[") || responseBody.startsWith("{")) {
+                // ২. যদি রেসপন্স JSON হয়
+                if (responseBody.startsWith("[")) {
+                    val jsonArray = JSONArray(responseBody)
+                    for (i in 0 until jsonArray.length()) {
+                        val item = jsonArray.optJSONObject(i) ?: continue
+                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.ifEmpty { item.optString("post_title", "") }.trim()
+                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.ifEmpty { item.optString("permalink", "") }.trim()
+                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.ifEmpty { item.optString("post_image", "") }.trim()
 
                         if (title.isNotEmpty() && url.isNotEmpty()) {
                             if (!url.startsWith("http")) {
                                 url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
                             }
-                            list.add(
-                                MovieItem(
-                                    title = title,
-                                    image = image,
-                                    url = url,
-                                    imageSize = "2:3"
-                                )
-                            )
+                            list.add(MovieItem(title = title, image = image, url = url, imageSize = "2:3"))
+                        }
+                    }
+                } else {
+                    val jsonObject = JSONObject(responseBody)
+                    val keys = jsonObject.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val item = jsonObject.optJSONObject(key) ?: continue
+                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.ifEmpty { item.optString("post_title", "") }.trim()
+                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.ifEmpty { item.optString("permalink", "") }.trim()
+                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.ifEmpty { item.optString("post_image", "") }.trim()
+
+                        if (title.isNotEmpty() && url.isNotEmpty()) {
+                            if (!url.startsWith("http")) {
+                                url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
+                            }
+                            list.add(MovieItem(title = title, image = image, url = url, imageSize = "2:3"))
+                        }
+                    }
+                }
+            }
+
+            // ৩. ফলব্যাক: যদি search-api থেকে কোনো কারণে কিছু না পাওয়া যায়, মূল সার্চে রিকোয়েস্ট
+            if (list.isEmpty()) {
+                val fallbackDoc = Jsoup.connect("$mainUrl/?s=$encodedQuery")
+                    .userAgent(userAgent)
+                    .timeout(15000)
+                    .get()
+
+                val cards = fallbackDoc.select("a.movie-card")
+                for (card in cards) {
+                    var url = card.attr("href").trim()
+                    val image = card.selectFirst(".movie-card-image img")?.attr("src")?.trim() ?: ""
+                    val title = card.selectFirst(".movie-card-content .movie-card-title")?.text()?.trim() ?: ""
+
+                    if (title.isNotEmpty() && url.isNotEmpty()) {
+                        if (!url.startsWith("http")) {
+                            url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
+                        }
+                        if (list.none { it.url == url }) {
+                            list.add(MovieItem(title = title, image = image, url = url, imageSize = "2:3"))
                         }
                     }
                 }
