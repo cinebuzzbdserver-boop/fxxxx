@@ -61,7 +61,7 @@ class CineFreakProvider : MainAPI() {
         val list = mutableListOf<MovieItem>()
         try {
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-            val searchApiUrl = "$mainUrl/wp-json/dooplay/search/?keyword=$encodedQuery&nonce="
+            val searchApiUrl = "$mainUrl/search-api.php?q=$encodedQuery&pg=1"
 
             val response = Jsoup.connect(searchApiUrl)
                 .userAgent(userAgent)
@@ -72,17 +72,18 @@ class CineFreakProvider : MainAPI() {
 
             val jsonStr = response.body().trim()
 
-            if (jsonStr.startsWith("{")) {
-                val jsonObject = JSONObject(jsonStr)
-                val keys = jsonObject.keys()
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    val item = jsonObject.optJSONObject(key) ?: continue
-                    val title = item.optString("title", "").trim()
-                    val url = item.optString("url", "").trim()
-                    val image = item.optString("img", "").trim()
+            if (jsonStr.startsWith("[")) {
+                val jsonArray = JSONArray(jsonStr)
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.optJSONObject(i) ?: continue
+                    val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
+                    var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
+                    val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
 
                     if (title.isNotEmpty() && url.isNotEmpty()) {
+                        if (!url.startsWith("http")) {
+                            url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
+                        }
                         list.add(
                             MovieItem(
                                 title = title,
@@ -93,23 +94,55 @@ class CineFreakProvider : MainAPI() {
                         )
                     }
                 }
-            } else if (jsonStr.startsWith("[")) {
-                val jsonArray = JSONArray(jsonStr)
-                for (i in 0 until jsonArray.length()) {
-                    val item = jsonArray.optJSONObject(i) ?: continue
-                    val title = item.optString("title", "").trim()
-                    val url = item.optString("url", "").trim()
-                    val image = item.optString("img", "").trim()
+            } else if (jsonStr.startsWith("{")) {
+                val jsonObject = JSONObject(jsonStr)
+                val resultsArray = jsonObject.optJSONArray("results") 
+                    ?: jsonObject.optJSONArray("data") 
+                    ?: jsonObject.optJSONArray("items")
 
-                    if (title.isNotEmpty() && url.isNotEmpty()) {
-                        list.add(
-                            MovieItem(
-                                title = title,
-                                image = image,
-                                url = url,
-                                imageSize = "2:3"
+                if (resultsArray != null) {
+                    for (i in 0 until resultsArray.length()) {
+                        val item = resultsArray.optJSONObject(i) ?: continue
+                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
+                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
+                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
+
+                        if (title.isNotEmpty() && url.isNotEmpty()) {
+                            if (!url.startsWith("http")) {
+                                url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
+                            }
+                            list.add(
+                                MovieItem(
+                                    title = title,
+                                    image = image,
+                                    url = url,
+                                    imageSize = "2:3"
+                                )
                             )
-                        )
+                        }
+                    }
+                } else {
+                    val keys = jsonObject.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        val item = jsonObject.optJSONObject(key) ?: continue
+                        val title = item.optString("title", "").ifEmpty { item.optString("name", "") }.trim()
+                        var url = item.optString("url", "").ifEmpty { item.optString("link", "") }.trim()
+                        val image = item.optString("img", "").ifEmpty { item.optString("image", "") }.ifEmpty { item.optString("poster", "") }.trim()
+
+                        if (title.isNotEmpty() && url.isNotEmpty()) {
+                            if (!url.startsWith("http")) {
+                                url = if (url.startsWith("/")) "$mainUrl$url" else "$mainUrl/$url"
+                            }
+                            list.add(
+                                MovieItem(
+                                    title = title,
+                                    image = image,
+                                    url = url,
+                                    imageSize = "2:3"
+                                )
+                            )
+                        }
                     }
                 }
             }
