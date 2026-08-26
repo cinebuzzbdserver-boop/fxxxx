@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -25,14 +25,13 @@ jobs:
         run: |
           curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
           curl -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar
-          curl -sLo json.jar https://repo1.maven.org/maven2/org/json/json/20231013/json-20231013.jar
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
       - name: Build Plugins to FLX
         run: |
-          ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
-          D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
+          ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -name "android.jar" | sort -V | tail -n 1)
+          D8_TOOL=$(find "$ANDROID_HOME/build-tools" -name "d8" -type f | sort -V | tail -n 1)
 
           mkdir -p src/com/flixora/plugin
           cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
@@ -87,12 +86,14 @@ jobs:
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
               ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
-                -cp "jsoup.jar:coroutines.jar:json.jar:$ANDROID_JAR" \
+                -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
               mkdir -p "dex_out_${outputName}"
               $D8_TOOL --release --min-api 21 \
                 --lib "$ANDROID_JAR" \
+                --lib jsoup.jar \
+                --lib coroutines.jar \
                 --output "dex_out_${outputName}" \
                 "${outputName}_temp.jar"
 
@@ -103,7 +104,7 @@ jobs:
             fi
           done
 
-          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar json.jar
+          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar
 
       - name: Commit and Push FLX Binaries
         run: |
