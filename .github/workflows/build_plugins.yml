@@ -30,8 +30,8 @@ jobs:
 
       - name: Build Plugins to FLX
         run: |
-          ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -name "android.jar" | sort -V | tail -n 1)
-          D8_TOOL=$(find "$ANDROID_HOME/build-tools" -name "d8" -type f | sort -V | tail -n 1)
+          ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
+          D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
 
           mkdir -p src/com/flixora/plugin
           cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
