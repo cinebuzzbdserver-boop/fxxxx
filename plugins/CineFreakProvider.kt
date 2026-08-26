@@ -6,7 +6,6 @@ import com.flixora.plugin.MediaStructure
 import com.flixora.plugin.MovieItem
 import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
-import org.json.JSONObject
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
@@ -69,34 +68,35 @@ class CineFreakProvider : MainAPI() {
                 .timeout(15000)
                 .execute()
 
-            val jsonStr = response.body().trim()
-            val jsonObject = JSONObject(jsonStr)
-            val resultsArray = jsonObject.optJSONArray("results")
+            val rawJson = response.body().trim()
 
-            if (resultsArray != null) {
-                for (i in 0 until resultsArray.length()) {
-                    val item = resultsArray.optJSONObject(i) ?: continue
+            // org.json ব্যবহার না করে পিওর Regex দিয়ে রেজাল্ট পার্সিং
+            val blockRegex = Regex("""\{"t":"(.*?)","l":"(.*?)".*?"i":"(.*?)".*?\}""")
+            val matches = blockRegex.findAll(rawJson)
 
-                    val title = item.optString("t", "").trim()
-                    val slug = item.optString("l", "").trim()
-                    val image = item.optString("i", "").trim()
+            for (match in matches) {
+                var title = match.groupValues[1]
+                val slug = match.groupValues[2]
+                var image = match.groupValues[3]
 
-                    if (title.isNotEmpty() && slug.isNotEmpty()) {
-                        val fullUrl = if (slug.startsWith("http")) {
-                            slug
-                        } else {
-                            "$mainUrl/$slug/"
-                        }
+                title = title.replace("\\/", "/").replace("\\\"", "\"").trim()
+                image = image.replace("\\/", "/").trim()
 
-                        list.add(
-                            MovieItem(
-                                title = title,
-                                image = image,
-                                url = fullUrl,
-                                imageSize = "2:3"
-                            )
-                        )
+                if (title.isNotEmpty() && slug.isNotEmpty()) {
+                    val fullUrl = if (slug.startsWith("http")) {
+                        slug
+                    } else {
+                        "$mainUrl/$slug/"
                     }
+
+                    list.add(
+                        MovieItem(
+                            title = title,
+                            image = image,
+                            url = fullUrl,
+                            imageSize = "2:3"
+                        )
+                    )
                 }
             }
         } catch (e: Exception) {
