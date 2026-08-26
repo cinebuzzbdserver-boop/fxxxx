@@ -99,7 +99,7 @@ class CineFreakProvider : MainAPI() {
 
             val epCards = doc.select(".episode-grid .ep-card")
 
-            // ১. সিরিজ বা টিভি শো থাকলে শুধুমাত্র download-links নেওয়া হবে
+            // ১. সিরিজ বা টিভি শো থাকলে শুধুমাত্র download-links নেওয়া হবে
             if (epCards.isNotEmpty() || doc.selectFirst(".season-number") != null) {
                 val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
 
@@ -109,7 +109,7 @@ class CineFreakProvider : MainAPI() {
                     val epBadge = card.selectFirst(".episode-badge")?.text()?.trim() ?: ""
                     val epTitle = if (epBadge.isNotEmpty()) epBadge else (card.selectFirst(".ep-title")?.text()?.trim() ?: "Episode")
 
-                    // কঠোরভাবে শুধুমাত্র .quality-box.download-links টার্গেট
+                    // শুধুমাত্র .quality-box.download-links টার্গেট
                     val downloadBox = card.selectFirst(".quality-box.download-links")
                     val links = downloadBox?.select(".quality-grid a") ?: emptyList()
 
