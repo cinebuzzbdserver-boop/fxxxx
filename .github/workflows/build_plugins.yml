@@ -32,6 +32,7 @@ jobs:
         run: |
           ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
           D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
+          STDLIB_JAR="$(pwd)/kotlinc/lib/kotlin-stdlib.jar"
 
           mkdir -p src/com/flixora/plugin
           cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
@@ -90,9 +91,17 @@ jobs:
                 -d "${outputName}_temp.jar"
 
               mkdir -p "dex_out_${outputName}"
-              $D8_TOOL --release --min-api 21 --lib "$ANDROID_JAR" --lib jsoup.jar --lib coroutines.jar --output "dex_out_${outputName}" "${outputName}_temp.jar"
+              $D8_TOOL --release --min-api 21 \
+                --lib "$ANDROID_JAR" \
+                --lib "$STDLIB_JAR" \
+                --lib jsoup.jar \
+                --lib coroutines.jar \
+                --output "dex_out_${outputName}" \
+                "${outputName}_temp.jar"
 
-              mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
+              if [ -f "dex_out_${outputName}/classes.dex" ]; then
+                mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
+              fi
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
           done
@@ -103,5 +112,5 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.flx
+          git add *.flx || true
           git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .flx binaries" && git push)
