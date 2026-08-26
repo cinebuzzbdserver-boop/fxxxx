@@ -70,7 +70,6 @@ class CineFreakProvider : MainAPI() {
 
             val rawJson = response.body().trim()
 
-            // org.json ব্যবহার না করে পিওর Regex দিয়ে রেজাল্ট পার্সিং
             val blockRegex = Regex("""\{"t":"(.*?)","l":"(.*?)".*?"i":"(.*?)".*?\}""")
             val matches = blockRegex.findAll(rawJson)
 
