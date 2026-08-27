@@ -105,13 +105,13 @@ class HDHub4uProvider : MainAPI() {
     }
 
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
+        val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
             val doc = Jsoup.connect(postUrl)
                 .userAgent(userAgent)
                 .timeout(15000)
                 .get()
 
-            val rawMovieLinks = mutableListOf<Pair<String, String>>()
             val linkElements = doc.select("a[href*='hubdrive.tips']")
 
             for (link in linkElements) {
@@ -124,8 +124,6 @@ class HDHub4uProvider : MainAPI() {
                     rawMovieLinks.add(Pair(qualityText, href))
                 }
             }
-
-            return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -139,7 +137,6 @@ class HDHub4uProvider : MainAPI() {
                 val match = fileIdRegex.find(generateUrl)
                 val fileId = match?.groupValues?.get(1)?.trim() ?: return null
 
-                // First hit the page to get necessary cookies/session
                 val initialResponse = Jsoup.connect(generateUrl)
                     .userAgent("Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36")
                     .referrer("https://new5.hdhub4u.cl/")
