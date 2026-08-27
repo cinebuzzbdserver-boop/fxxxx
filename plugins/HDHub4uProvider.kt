@@ -75,7 +75,6 @@ class HDHub4uProvider : MainAPI() {
 
             val rawJson = response.body().trim()
 
-            // Pure Regex Parsing for Pingora Search Response Structure
             val hitRegex = Regex(""""permalink"\s*:\s*"(.*?)".*?"post_thumbnail"\s*:\s*"(.*?)".*?"post_title"\s*:\s*"(.*?)"""")
             val matches = hitRegex.findAll(rawJson)
 
@@ -136,35 +135,40 @@ class HDHub4uProvider : MainAPI() {
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
             if (generateUrl.contains("hubdrive.tips")) {
-                // Extracting file ID from URL like https://hubdrive.tips/file/1907346668
                 val fileIdRegex = Regex("""/file/([0-9]+)""")
                 val match = fileIdRegex.find(generateUrl)
                 val fileId = match?.groupValues?.get(1)?.trim() ?: return null
 
+                // First hit the page to get necessary cookies/session
+                val initialResponse = Jsoup.connect(generateUrl)
+                    .userAgent("Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36")
+                    .referrer("https://new5.hdhub4u.cl/")
+                    .timeout(15000)
+                    .execute()
+
+                val cookies = initialResponse.cookies()
+
                 val ajaxUrl = "https://hubdrive.tips/ajax.php?ajax=direct-download"
-                
-                // Executing POST request mimicking the exact browser/curl headers
                 val response = Jsoup.connect(ajaxUrl)
                     .userAgent("Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36")
-                    .referrer("https://hubdrive.tips/")
+                    .referrer(generateUrl)
                     .header("origin", "https://hubdrive.tips")
                     .header("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
                     .header("x-requested-with", "XMLHttpRequest")
                     .header("accept", "application/json, text/javascript, */*; q=0.01")
+                    .cookies(cookies)
                     .requestBody("id=$fileId")
                     .ignoreContentType(true)
                     .method(org.jsoup.Connection.Method.POST)
                     .execute()
 
-                val jsonBody = response.body()
-                
-                // Extracting "gd" key value from the JSON response safely using regex
+                val jsonBody = response.body().trim()
                 val gdRegex = Regex(""""gd"\s*:\s*"([^"]+)"""")
                 val gdMatch = gdRegex.find(jsonBody)
                 val directLink = gdMatch?.groupValues?.get(1)?.trim()
 
                 if (!directLink.isNullOrEmpty()) {
-                    return directLink
+                    return directLink.replace("\\/", "/")
                 }
             }
         } catch (e: Exception) {
