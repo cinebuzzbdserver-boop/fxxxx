@@ -130,17 +130,20 @@ class HDHub4uProvider : MainAPI() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return MediaStructure(isSeries = false, rawMovieLinks = emptyList(), seasons = emptyList())
+        return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
     }
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
             if (generateUrl.contains("hubdrive.tips")) {
+                // Extracting file ID from URL like https://hubdrive.tips/file/1907346668
                 val fileIdRegex = Regex("""/file/([0-9]+)""")
                 val match = fileIdRegex.find(generateUrl)
                 val fileId = match?.groupValues?.get(1)?.trim() ?: return null
 
                 val ajaxUrl = "https://hubdrive.tips/ajax.php?ajax=direct-download"
+                
+                // Executing POST request mimicking the exact browser/curl headers
                 val response = Jsoup.connect(ajaxUrl)
                     .userAgent("Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36")
                     .referrer("https://hubdrive.tips/")
@@ -154,6 +157,8 @@ class HDHub4uProvider : MainAPI() {
                     .execute()
 
                 val jsonBody = response.body()
+                
+                // Extracting "gd" key value from the JSON response safely using regex
                 val gdRegex = Regex(""""gd"\s*:\s*"([^"]+)"""")
                 val gdMatch = gdRegex.find(jsonBody)
                 val directLink = gdMatch?.groupValues?.get(1)?.trim()
