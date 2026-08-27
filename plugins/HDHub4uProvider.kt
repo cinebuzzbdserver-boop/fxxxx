@@ -1,4 +1,4 @@
-Package com.flixora.providers
+package com.flixora.providers
 
 import com.flixora.plugin.EpisodeItem
 import com.flixora.plugin.MainAPI
@@ -112,16 +112,15 @@ class HDHub4uProvider : MainAPI() {
                 .timeout(15000)
                 .get()
 
-            // HDHub4u সাধারণত মুভি পেজের ভেতরে বিভিন্ন কোয়ালিটির Hubdrive লিঙ্ক বা ডাউনলোড লিঙ্ক দেয়
-            val linkElements = doc.select("a[href*='hubdrive.tips']")
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
+            val linkElements = doc.select("a[href*='hubdrive.tips']")
 
             for (link in linkElements) {
                 val href = link.attr("href").trim()
                 if (href.isNotEmpty()) {
                     var qualityText = link.text().trim()
                     if (qualityText.isEmpty() || qualityText.equals("[SAMPLE]", ignoreCase = true)) {
-                        qualityText = link.parent()?.text()?.trim() ?: "Download"
+                        qualityText = link.parent()?.text()?.trim() ?: "Download Link"
                     }
                     rawMovieLinks.add(Pair(qualityText, href))
                 }
@@ -136,7 +135,6 @@ class HDHub4uProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // Check if it's a hubdrive.tips link containing file id
             if (generateUrl.contains("hubdrive.tips")) {
                 val fileIdRegex = Regex("""/file/([0-9]+)""")
                 val match = fileIdRegex.find(generateUrl)
@@ -156,8 +154,6 @@ class HDHub4uProvider : MainAPI() {
                     .execute()
 
                 val jsonBody = response.body()
-                
-                // Extracting "gd" field from JSON response using Regex
                 val gdRegex = Regex(""""gd"\s*:\s*"([^"]+)"""")
                 val gdMatch = gdRegex.find(jsonBody)
                 val directLink = gdMatch?.groupValues?.get(1)?.trim()
