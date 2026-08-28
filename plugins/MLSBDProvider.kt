@@ -52,14 +52,8 @@ class MLSBDProvider : MainAPI() {
                 val aTag = post.selectFirst("div.thumb a") ?: post.selectFirst("div.post-desc a")
                 val url = aTag?.attr("href")?.trim() ?: ""
                 
-                // Exactly grabbing image from picture/img structure safely
-                var image = post.selectFirst("picture img")?.attr("src")?.trim() ?: ""
-                if (image.isEmpty()) {
-                    image = post.selectFirst("picture source[type='image/jpeg']")?.attr("srcset")?.trim() ?: ""
-                }
-                if (image.isEmpty()) {
-                    image = post.selectFirst("picture source")?.attr("srcset")?.trim() ?: ""
-                }
+                // Grabbing image STRICTLY from the <img> tag's src attribute only
+                val image = post.selectFirst("img")?.attr("src")?.trim() ?: ""
 
                 val titleElement = post.selectFirst("h2.post-title")
                 val title = titleElement?.text()?.trim() 
@@ -104,13 +98,8 @@ class MLSBDProvider : MainAPI() {
                 val aTag = post.selectFirst("div.thumb a") ?: post.selectFirst("div.post-desc a")
                 val url = aTag?.attr("href")?.trim() ?: ""
                 
-                var image = post.selectFirst("picture img")?.attr("src")?.trim() ?: ""
-                if (image.isEmpty()) {
-                    image = post.selectFirst("picture source[type='image/jpeg']")?.attr("srcset")?.trim() ?: ""
-                }
-                if (image.isEmpty()) {
-                    image = post.selectFirst("picture source")?.attr("srcset")?.trim() ?: ""
-                }
+                // Grabbing image STRICTLY from the <img> tag's src attribute only
+                val image = post.selectFirst("img")?.attr("src")?.trim() ?: ""
 
                 val titleElement = post.selectFirst("h2.post-title")
                 val title = titleElement?.text()?.trim() 
