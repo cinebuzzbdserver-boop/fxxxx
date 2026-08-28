@@ -13,27 +13,25 @@ class MLSBDProvider : MainAPI() {
     override var name = "MLSBD"
     override var mainUrl = "https://mlsbd.co"
 
-    // Exact user-agent provided from your real client request
+    // Exact user-agent matching your provided curl request
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36"
 
-    private fun getBrowserConnection(url: String, refUrl: String = mainUrl): org.jsoup.Connection {
+    private fun getClient(url: String, refUrl: String = mainUrl): org.jsoup.Connection {
         return Jsoup.connect(url)
             .userAgent(userAgent)
             .referrer(refUrl)
             .header("Host", "mlsbd.co")
-            .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            .header("accept", "text/plain, */*; q=0.01")
             .header("accept-language", "en-IN,en-US;q=0.9,en;q=0.8")
-            .header("accept-encoding", "gzip, deflate, br")
+            .header("accept-encoding", "identity")
             .header("connection", "keep-alive")
-            .header("upgrade-insecure-requests", "1")
             .header("x-requested-with", "XMLHttpRequest")
             .header("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"")
             .header("sec-ch-ua-mobile", "?1")
             .header("sec-ch-ua-platform", "\"Android\"")
-            .header("sec-fetch-dest", "document")
-            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-origin")
-            .header("sec-fetch-user", "?1")
             .header("priority", "u=1, i")
             .timeout(20000)
             .followRedirects(true)
@@ -48,7 +46,7 @@ class MLSBDProvider : MainAPI() {
                 "$mainUrl/page/$page/"
             }
 
-            val doc = getBrowserConnection(targetUrl).get()
+            val doc = getClient(targetUrl, mainUrl).get()
             val posts = doc.select("div.single-post")
 
             for (post in posts) {
@@ -95,7 +93,7 @@ class MLSBDProvider : MainAPI() {
             }
 
             val refUrl = if (page <= 1) "$mainUrl/?s=$encodedQuery" else "$mainUrl/?s=$encodedQuery&paged=${page - 1}"
-            val doc = getBrowserConnection(searchUrl, refUrl).get()
+            val doc = getClient(searchUrl, refUrl).get()
             val posts = doc.select("div.single-post")
 
             for (post in posts) {
@@ -134,9 +132,7 @@ class MLSBDProvider : MainAPI() {
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
-            val res = getBrowserConnection(postUrl, mainUrl).execute()
-            val doc = res.parse()
-
+            val doc = getClient(postUrl, mainUrl).get()
             val linkElements = doc.select("a.Dbtn, a[href*='savelinks.me']")
 
             for (link in linkElements) {
@@ -157,8 +153,8 @@ class MLSBDProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // Step 1: Hit savelinks.me link with exact headers
-            val saveLinksRes = getBrowserConnection(generateUrl, mainUrl).execute()
+            // Step 1: Connect to savelinks.me link with browser headers
+            val saveLinksRes = getClient(generateUrl, mainUrl).execute()
             val saveLinksDoc = saveLinksRes.parse()
             val cookies = saveLinksRes.cookies()
 
@@ -166,12 +162,18 @@ class MLSBDProvider : MainAPI() {
                 ?: saveLinksDoc.selectFirst("a.break-words")?.attr("href")?.trim() 
                 ?: return null
 
-            // Step 2: Hit multi-cloud links redirect page holding cookies
-            val multiCloudRes = getBrowserConnection(multiCloudLink, generateUrl)
+            // Step 2: Connect to new.multicloudlinks.com using cookies and correct headers
+            val multiCloudRes = Jsoup.connect(multiCloudLink)
+                .userAgent(userAgent)
+                .referrer(generateUrl)
                 .cookies(cookies)
+                .timeout(15000)
+                .followRedirects(true)
                 .execute()
+
             val multiCloudDoc = multiCloudRes.parse()
 
+            // Step 3: Extract the Turbo Download R2 link
             val turboBtn = multiCloudDoc.selectFirst("a.premium-btn, a[href*='multidownload.website']")
             val directStreamUrl = turboBtn?.attr("href")?.trim() ?: ""
 
