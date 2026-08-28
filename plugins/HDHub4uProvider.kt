@@ -18,6 +18,7 @@ class HDHub4uProvider : MainAPI() {
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
+            // Fix: Correct pagination URL structure for main page (e.g., /page/2/)
             val targetUrl = if (page <= 1) {
                 mainUrl
             } else {
