@@ -18,7 +18,6 @@ class HDHub4uProvider : MainAPI() {
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
-            // Fix: Correct pagination URL structure for main page (e.g., /page/2/)
             val targetUrl = if (page <= 1) {
                 mainUrl
             } else {
@@ -33,12 +32,20 @@ class HDHub4uProvider : MainAPI() {
             val thumbElements = doc.select("li.thumb")
 
             for (thumb in thumbElements) {
-                val aTag = thumb.selectFirst("figure > a") ?: thumb.selectFirst("figcaption > a")
+                val aTag = thumb.selectFirst("figure > a") 
+                    ?: thumb.selectFirst("figcaption > a") 
+                    ?: thumb.selectFirst("a")
+                
                 val url = aTag?.attr("href")?.trim() ?: ""
-                val imgElement = thumb.selectFirst("figure > img")
+                
+                val imgElement = thumb.selectFirst("figure > img") 
+                    ?: thumb.selectFirst("img")
+                
                 val image = imgElement?.attr("src")?.trim() ?: ""
+                
                 val title = imgElement?.attr("title")?.trim().takeIf { !it.isNullOrEmpty() } 
-                    ?: thumb.selectFirst("figcaption p")?.text()?.trim() ?: ""
+                    ?: thumb.selectFirst("figcaption p")?.text()?.trim() 
+                    ?: aTag?.attr("title")?.trim() ?: ""
 
                 if (title.isNotEmpty() && url.isNotEmpty()) {
                     list.add(
