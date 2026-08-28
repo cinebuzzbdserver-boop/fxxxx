@@ -13,25 +13,28 @@ class MLSBDProvider : MainAPI() {
     override var name = "MLSBD"
     override var mainUrl = "https://mlsbd.co"
 
-    // Real modern mobile/desktop browser user-agent to bypass basic bot detection
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    // Exact user-agent provided from your real client request
+    private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36"
 
     private fun getBrowserConnection(url: String, refUrl: String = mainUrl): org.jsoup.Connection {
         return Jsoup.connect(url)
             .userAgent(userAgent)
             .referrer(refUrl)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Accept-Encoding", "gzip, deflate, br")
-            .header("Connection", "keep-alive")
-            .header("Upgrade-Insecure-Requests", "1")
-            .header("Sec-Ch-Ua", "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"")
-            .header("Sec-Ch-Ua-Mobile", "?0")
-            .header("Sec-Ch-Ua-Platform", "\"Windows\"")
-            .header("Sec-Fetch-Dest", "document")
-            .header("Sec-Fetch-Mode", "navigate")
-            .header("Sec-Fetch-Site", "same-origin")
-            .header("Sec-Fetch-User", "?1")
+            .header("Host", "mlsbd.co")
+            .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            .header("accept-language", "en-IN,en-US;q=0.9,en;q=0.8")
+            .header("accept-encoding", "gzip, deflate, br")
+            .header("connection", "keep-alive")
+            .header("upgrade-insecure-requests", "1")
+            .header("x-requested-with", "XMLHttpRequest")
+            .header("sec-ch-ua", "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Android WebView\";v=\"150\"")
+            .header("sec-ch-ua-mobile", "?1")
+            .header("sec-ch-ua-platform", "\"Android\"")
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-site", "same-origin")
+            .header("sec-fetch-user", "?1")
+            .header("priority", "u=1, i")
             .timeout(20000)
             .followRedirects(true)
     }
@@ -91,7 +94,8 @@ class MLSBDProvider : MainAPI() {
                 "$mainUrl/?s=$encodedQuery&paged=$page"
             }
 
-            val doc = getBrowserConnection(searchUrl, mainUrl).get()
+            val refUrl = if (page <= 1) "$mainUrl/?s=$encodedQuery" else "$mainUrl/?s=$encodedQuery&paged=${page - 1}"
+            val doc = getBrowserConnection(searchUrl, refUrl).get()
             val posts = doc.select("div.single-post")
 
             for (post in posts) {
@@ -130,10 +134,8 @@ class MLSBDProvider : MainAPI() {
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
-            // Mimic real browser visit to the movie post page with cookies/session handling
             val res = getBrowserConnection(postUrl, mainUrl).execute()
             val doc = res.parse()
-            val cookies = res.cookies()
 
             val linkElements = doc.select("a.Dbtn, a[href*='savelinks.me']")
 
@@ -155,7 +157,7 @@ class MLSBDProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // Step 1: Hit savelinks.me with browser-like headers & referrer
+            // Step 1: Hit savelinks.me link with exact headers
             val saveLinksRes = getBrowserConnection(generateUrl, mainUrl).execute()
             val saveLinksDoc = saveLinksRes.parse()
             val cookies = saveLinksRes.cookies()
@@ -164,18 +166,11 @@ class MLSBDProvider : MainAPI() {
                 ?: saveLinksDoc.selectFirst("a.break-words")?.attr("href")?.trim() 
                 ?: return null
 
-            // Step 2: Hit multi-cloud links redirect page holding cookies and referrer
+            // Step 2: Hit multi-cloud links redirect page holding cookies
             val multiCloudRes = getBrowserConnection(multiCloudLink, generateUrl)
                 .cookies(cookies)
                 .execute()
             val multiCloudDoc = multiCloudRes.parse()
-            val multiCookies = multiCloudRes.cookies()
-
-            // Merge cookies if needed
-            val combinedCookies = mutableMapOf<String, String>().apply {
-                putAll(cookies)
-                putAll(multiCookies)
-            }
 
             val turboBtn = multiCloudDoc.selectFirst("a.premium-btn, a[href*='multidownload.website']")
             val directStreamUrl = turboBtn?.attr("href")?.trim() ?: ""
