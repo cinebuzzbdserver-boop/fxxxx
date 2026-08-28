@@ -29,33 +29,45 @@ class HDHub4uProvider : MainAPI() {
                 .timeout(15000)
                 .get()
 
+            // Selecting all thumb items safely
             val thumbElements = doc.select("li.thumb")
 
             for (thumb in thumbElements) {
-                val aTag = thumb.selectFirst("figure > a") 
-                    ?: thumb.selectFirst("figcaption > a") 
-                    ?: thumb.selectFirst("a")
-                
-                val url = aTag?.attr("href")?.trim() ?: ""
-                
-                val imgElement = thumb.selectFirst("figure > img") 
-                    ?: thumb.selectFirst("img")
-                
-                val image = imgElement?.attr("src")?.trim() ?: ""
-                
-                val title = imgElement?.attr("title")?.trim().takeIf { !it.isNullOrEmpty() } 
-                    ?: thumb.selectFirst("figcaption p")?.text()?.trim() 
-                    ?: aTag?.attr("title")?.trim() ?: ""
+                try {
+                    // Fallback selectors for broken/incomplete HTML tags on later pages
+                    val aTag = thumb.selectFirst("figure > a") 
+                        ?: thumb.selectFirst("figcaption > a") 
+                        ?: thumb.selectFirst("a[href*='hdhub4u']")
+                        ?: thumb.selectFirst("a")
 
-                if (title.isNotEmpty() && url.isNotEmpty()) {
-                    list.add(
-                        MovieItem(
-                            title = title,
-                            image = image,
-                            url = url,
-                            imageSize = "2:3"
+                    val url = aTag?.attr("href")?.trim() ?: continue
+                    if (url.isEmpty()) continue
+
+                    val imgElement = thumb.selectFirst("figure > img") 
+                        ?: thumb.selectFirst("img")
+
+                    val image = imgElement?.attr("src")?.trim() 
+                        ?: imgElement?.attr("data-src")?.trim() ?: ""
+
+                    // Extract title safely even if figcaption or p tag is broken
+                    val title = imgElement?.attr("title")?.trim().takeIf { !it.isNullOrEmpty() } 
+                        ?: thumb.selectFirst("figcaption p")?.text()?.trim() 
+                        ?: thumb.selectFirst("p")?.text()?.trim()
+                        ?: aTag.attr("title").trim()
+
+                    if (title.isNotEmpty() && !list.any { it.url == url }) {
+                        list.add(
+                            MovieItem(
+                                title = title,
+                                image = image,
+                                url = url,
+                                imageSize = "2:3"
+                            )
                         )
-                    )
+                    }
+                } catch (innerEx: Exception) {
+                    // Skip only the broken item and continue parsing the rest of the page
+                    continue
                 }
             }
         } catch (e: Exception) {
