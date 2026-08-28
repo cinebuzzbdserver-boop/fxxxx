@@ -13,7 +13,6 @@ class MLSBDProvider : MainAPI() {
     override var name = "MLSBD"
     override var mainUrl = "https://mlsbd.co"
 
-    // Exact user-agent matching your curl request to prevent blocking
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.183 Mobile Safari/537.36"
 
     private fun getClient(url: String, refUrl: String = mainUrl): org.jsoup.Connection {
@@ -53,9 +52,11 @@ class MLSBDProvider : MainAPI() {
                 val aTag = post.selectFirst("div.thumb a") ?: post.selectFirst("div.post-desc a")
                 val url = aTag?.attr("href")?.trim() ?: ""
                 
-                // Extracting image precisely from MLSBD picture/img/source structure
-                val imgElement = post.selectFirst("picture img") ?: post.selectFirst("img")
-                var image = imgElement?.attr("src")?.trim() ?: ""
+                // Exactly grabbing image from picture/img structure safely
+                var image = post.selectFirst("picture img")?.attr("src")?.trim() ?: ""
+                if (image.isEmpty()) {
+                    image = post.selectFirst("picture source[type='image/jpeg']")?.attr("srcset")?.trim() ?: ""
+                }
                 if (image.isEmpty()) {
                     image = post.selectFirst("picture source")?.attr("srcset")?.trim() ?: ""
                 }
@@ -70,7 +71,7 @@ class MLSBDProvider : MainAPI() {
                             title = title,
                             image = image,
                             url = url,
-                            imageSize = "2:3" // Exact CineFreak format output
+                            imageSize = "2:3"
                         )
                     )
                 }
@@ -103,8 +104,10 @@ class MLSBDProvider : MainAPI() {
                 val aTag = post.selectFirst("div.thumb a") ?: post.selectFirst("div.post-desc a")
                 val url = aTag?.attr("href")?.trim() ?: ""
                 
-                val imgElement = post.selectFirst("picture img") ?: post.selectFirst("img")
-                var image = imgElement?.attr("src")?.trim() ?: ""
+                var image = post.selectFirst("picture img")?.attr("src")?.trim() ?: ""
+                if (image.isEmpty()) {
+                    image = post.selectFirst("picture source[type='image/jpeg']")?.attr("srcset")?.trim() ?: ""
+                }
                 if (image.isEmpty()) {
                     image = post.selectFirst("picture source")?.attr("srcset")?.trim() ?: ""
                 }
@@ -119,7 +122,7 @@ class MLSBDProvider : MainAPI() {
                             title = title,
                             image = image,
                             url = url,
-                            imageSize = "2:3" // Exact CineFreak format output
+                            imageSize = "2:3"
                         )
                     )
                 }
@@ -158,7 +161,6 @@ class MLSBDProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            // Step 1: Connect to savelinks.me generator link using exact client headers
             val saveLinksRes = getClient(generateUrl, mainUrl).execute()
             val saveLinksDoc = saveLinksRes.parse()
             val cookies = saveLinksRes.cookies()
@@ -167,7 +169,6 @@ class MLSBDProvider : MainAPI() {
                 ?: saveLinksDoc.selectFirst("a.break-words")?.attr("href")?.trim() 
                 ?: return null
 
-            // Step 2: Connect to multicloudlinks redirect page holding the cookies
             val multiCloudRes = Jsoup.connect(multiCloudLink)
                 .userAgent(userAgent)
                 .referrer(generateUrl)
@@ -180,8 +181,6 @@ class MLSBDProvider : MainAPI() {
                 .execute()
 
             val multiCloudDoc = multiCloudRes.parse()
-
-            // Step 3: Extract final Turbo Download direct R2 link
             val turboBtn = multiCloudDoc.selectFirst("a.premium-btn, a[href*='multidownload.website']")
             val directStreamUrl = turboBtn?.attr("href")?.trim() ?: ""
 
