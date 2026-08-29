@@ -37,7 +37,7 @@ class PikaHDProvider : MainAPI() {
 
             val doc = Jsoup.connect(targetUrl)
                 .headers(getBaseHeaders(mainUrl))
-                .timeout(20000)
+                .timeout(25000)
                 .get()
 
             val html = doc.html()
@@ -46,7 +46,7 @@ class PikaHDProvider : MainAPI() {
 
             if (match != null) {
                 val rawJson = match.groupValues[1]
-                val itemRegex = Regex("""\{[^{}]*?"post_title":"(.*?)".*?"slug":"(.*?)".*?"thumbnail_image":"(.*?)".*?\}""")
+                val itemRegex = Regex("""post_title:\s*"([^"]+)",\s*slug:\s*"([^"]+)",\s*thumbnail_image:\s*"([^"]+)"""")
                 val itemMatches = itemRegex.findAll(rawJson)
 
                 for (m in itemMatches) {
@@ -88,12 +88,15 @@ class PikaHDProvider : MainAPI() {
                 .header("Accept", "application/json, text/plain, */*")
                 .header("x-sveltekit-invalidated", "01")
                 .ignoreContentType(true)
-                .timeout(20000)
+                .timeout(25000)
                 .execute()
 
             val rawData = response.body().trim()
-            val pattern = Regex("""\{[^{}]*?"post_title":\d+,"slug":\d+,"thumbnail_image":\d+\},\[\d+(?:,\d+)*\],"(.*?)","(.*?)","(.*?)"""")
-            val matches = pattern.findAll(rawData)
+            val chunkLines = rawData.lines().filter { it.contains(""""type":"chunk"""") || it.contains(""""post_title"""") }
+            val targetData = if (chunkLines.isNotEmpty()) chunkLines.joinToString("\n") else rawData
+
+            val searchPattern = Regex("""\[\d+(?:,\d+)*\],"(?:[^"\\]|\\.)*?","\d+","publish","(.*?)","(.*?)","(https?://[^"]+)"""")
+            val matches = searchPattern.findAll(targetData)
 
             for (m in matches) {
                 var title = m.groupValues[1].replace("\\/", "/").replace("\\\"", "\"").trim()
@@ -126,7 +129,7 @@ class PikaHDProvider : MainAPI() {
         try {
             val doc = Jsoup.connect(postUrl)
                 .headers(getBaseHeaders(mainUrl))
-                .timeout(20000)
+                .timeout(25000)
                 .get()
 
             val html = doc.html()
@@ -137,7 +140,7 @@ class PikaHDProvider : MainAPI() {
 
             if (match != null) {
                 val jsonStr = match.groupValues[1]
-                val contentRegex = Regex(""""post_content":"(.*?)",""", RegexOption.DOT_MATCHES_ALL)
+                val contentRegex = Regex("""post_content\s*:\s*"(.*)"""", RegexOption.DOT_MATCHES_ALL)
                 val cMatch = contentRegex.find(jsonStr)
                 if (cMatch != null) {
                     postContent = cMatch.groupValues[1]
@@ -223,7 +226,7 @@ class PikaHDProvider : MainAPI() {
                 .requestBody("{}")
                 .ignoreContentType(true)
                 .method(org.jsoup.Connection.Method.POST)
-                .timeout(20000)
+                .timeout(25000)
                 .execute()
 
             val apiBody = apiResponse.body()
@@ -235,7 +238,7 @@ class PikaHDProvider : MainAPI() {
 
             val driveDoc = Jsoup.connect(hubdriveUrl)
                 .headers(getBaseHeaders("https://$domain/"))
-                .timeout(20000)
+                .timeout(25000)
                 .get()
 
             val downloadBtn = driveDoc.selectFirst("a#download, a.btn-primary")
@@ -253,7 +256,7 @@ class PikaHDProvider : MainAPI() {
 
             val dlPageDoc = Jsoup.connect(generateLink)
                 .headers(getBaseHeaders(hubdriveUrl))
-                .timeout(20000)
+                .timeout(25000)
                 .get()
 
             val fslBtn = dlPageDoc.selectFirst("a#fsl, a.btn-success")
