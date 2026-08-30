@@ -20,17 +20,11 @@ class PikaHDProvider : MainAPI() {
     private fun getBrowserHeaders(referer: String = mainUrl): Map<String, String> {
         return mapOf(
             "User-Agent" to userAgent,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language" to "en-US,en;q=0.9",
             "Referer" to referer,
             "Upgrade-Insecure-Requests" to "1",
-            "Sec-Ch-Ua" to "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
-            "Sec-Ch-Ua-Mobile" to "?0",
-            "Sec-Ch-Ua-Platform" to "\"Windows\"",
-            "Sec-Fetch-Dest" to "document",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Site" to "cross-site",
-            "Sec-Fetch-User" to "?1"
+            "Connection" to "keep-alive"
         )
     }
 
@@ -124,8 +118,48 @@ class PikaHDProvider : MainAPI() {
         return list
     }
 
+    // সরাসরি StreamItem লিস্ট রিটার্ন করার সাপোর্ট (যদি অ্যাপ loadLinks মেথড ব্যবহার করে)
     override suspend fun loadLinks(postUrl: String): List<StreamItem> {
-        return emptyList()
+        val streamList = mutableListOf<StreamItem>()
+        try {
+            val structure = loadMediaStructure(postUrl)
+            
+            // ১. যদি সিরিজ হয়:
+            if (structure.isSeries && structure.seasons.isNotEmpty()) {
+                for (season in structure.seasons) {
+                    for (ep in season.episodes) {
+                        for ((quality, link) in ep.rawGenerateLinks) {
+                            val directUrl = resolveDirectLink(link)
+                            if (!directUrl.isNullOrEmpty()) {
+                                streamList.add(
+                                    StreamItem(
+                                        name = "${season.name} - ${ep.name} [$quality]",
+                                        url = directUrl
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            } 
+            // ২. যদি সিঙ্গেল মুভি হয়:
+            else if (structure.rawMovieLinks.isNotEmpty()) {
+                for ((quality, link) in structure.rawMovieLinks) {
+                    val directUrl = resolveDirectLink(link)
+                    if (!directUrl.isNullOrEmpty()) {
+                        streamList.add(
+                            StreamItem(
+                                name = quality,
+                                url = directUrl
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return streamList
     }
 
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
@@ -165,15 +199,18 @@ class PikaHDProvider : MainAPI() {
                 val links = block.select("a[href*=/file/]")
                 if (links.isEmpty()) continue
 
-                val epMatch = Regex("""(E(?:pisode)?\s*\d+)""", RegexOption.IGNORE_CASE).find(text)
+                val epMatch = Regex("""(E\d+|Episode\s*\d+)""", RegexOption.IGNORE_CASE).find(text)
                 if (epMatch != null) {
                     isSeries = true
-                    val epNumber = Regex("""\d+""").find(epMatch.value)?.value ?: "01"
-                    val epName = "Episode $epNumber"
+                    val epNumMatch = Regex("""\d+""").find(epMatch.value)?.value ?: "1"
+                    val epName = "Episode $epNumMatch"
                     val rawLinks = mutableListOf<Pair<String, String>>()
 
                     for (link in links) {
-                        val quality = link.text().trim().ifEmpty { "Download" }
+                        var quality = link.text().trim()
+                        if (quality.isEmpty() || quality.equals("||", ignoreCase = true)) {
+                            quality = "HD Quality"
+                        }
                         val fileUrl = link.attr("href").trim()
                         if (fileUrl.isNotEmpty() && !rawLinks.any { it.second == fileUrl }) {
                             rawLinks.add(Pair(quality, fileUrl))
@@ -185,6 +222,13 @@ class PikaHDProvider : MainAPI() {
                         val existing = epList.find { it.name.equals(epName, ignoreCase = true) }
                         if (existing == null) {
                             epList.add(EpisodeItem(name = epName, rawGenerateLinks = rawLinks))
+                        } else {
+                            // লিংক মার্জ করা
+                            for (rLink in rawLinks) {
+                                if (!existing.rawGenerateLinks.any { it.second == rLink.second }) {
+                                    (existing.rawGenerateLinks as? MutableList)?.add(rLink)
+                                }
+                            }
                         }
                     }
                 }
@@ -221,7 +265,7 @@ class PikaHDProvider : MainAPI() {
             val domain = fileMatch.groupValues[1]
             val slug = fileMatch.groupValues[2]
 
-            // 1. POST request to API endpoint
+            // ১. API এন্ডপয়েন্টে POST রিকোয়েস্ট
             val apiUrl = "https://$domain/api/touchme/$slug?c=hubdrive_res"
             val apiRes = Jsoup.connect(apiUrl)
                 .userAgent(userAgent)
@@ -247,7 +291,7 @@ class PikaHDProvider : MainAPI() {
 
             if (hubdriveUrl.isEmpty() || !hubdriveUrl.startsWith("http")) return null
 
-            // 2. GET request to Hubcloud / Drive page
+            // ২. Hubcloud / Drive পেজে GET রিকোয়েস্ট
             val driveRes = Jsoup.connect(hubdriveUrl)
                 .headers(getBrowserHeaders("https://$domain/"))
                 .cookies(sessionCookies)
@@ -272,7 +316,7 @@ class PikaHDProvider : MainAPI() {
 
             if (generateLink.isEmpty() || !generateLink.startsWith("http")) return null
 
-            // 3. GET request to GamerXYT / Hubcloud.php resolver page
+            // ৩. Resolver পেজে (hubcloud.php) GET রিকোয়েস্ট
             val dlPageRes = Jsoup.connect(generateLink)
                 .headers(getBrowserHeaders(hubdriveUrl))
                 .cookies(sessionCookies)
@@ -295,7 +339,7 @@ class PikaHDProvider : MainAPI() {
                 }
             }
 
-            // 4. Append minute timestamp if not Cloudflare R2 direct stream link
+            // ৪. Cloudflare R2 বা FSL লিঙ্ক হ্যান্ডলিং
             if (directUrl.isNotEmpty() && directUrl.startsWith("http")) {
                 if (!directUrl.contains("r2.cloudflarestorage.com")) {
                     val minutes = Calendar.getInstance().get(Calendar.MINUTE)
