@@ -19,9 +19,10 @@ class PikaHDProvider : MainAPI() {
     private fun getBaseHeaders(referer: String = mainUrl): Map<String, String> {
         return mapOf(
             "User-Agent" to userAgent,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language" to "en-US,en;q=0.9",
             "Referer" to referer,
+            "Upgrade-Insecure-Requests" to "1",
             "Connection" to "keep-alive"
         )
     }
@@ -135,12 +136,12 @@ class PikaHDProvider : MainAPI() {
             val html = doc.html()
             var postContent = ""
 
-            val pattern = Regex("""__sveltekit_[a-zA-Z0-9]+\.resolve\(\s*(\{.*?\})\s*\)""", RegexOption.DOT_MATCHES_ALL)
+            val pattern = Regex("""__sveltekit_[a-zA-Z0-9]+\.resolve\(\s*(\{.+?\})\s*\)""", RegexOption.DOT_MATCHES_ALL)
             val match = pattern.find(html)
 
             if (match != null) {
                 val jsonStr = match.groupValues[1]
-                val contentRegex = Regex("""post_content\s*:\s*"(.*)"""", RegexOption.DOT_MATCHES_ALL)
+                val contentRegex = Regex(""""post_content"\s*:\s*"((?:[^"\\]|\\.)*)"""", RegexOption.DOT_MATCHES_ALL)
                 val cMatch = contentRegex.find(jsonStr)
                 if (cMatch != null) {
                     postContent = cMatch.groupValues[1]
@@ -149,32 +150,33 @@ class PikaHDProvider : MainAPI() {
                         .replace("\\t", "\t")
                         .replace("\\\"", "\"")
                         .replace("\\/", "/")
+                        .replace("\\u003C", "<")
+                        .replace("\\u003E", ">")
+                        .replace("\\u0026", "&")
                 }
             }
 
-            val contentDoc = if (postContent.isNotEmpty()) {
-                Jsoup.parse(postContent)
-            } else {
-                doc
-            }
+            val targetHtml = if (postContent.isNotEmpty()) postContent else html
+            val contentDoc = Jsoup.parse(targetHtml)
 
-            val episodeBlocks = contentDoc.select("h3, p")
+            val linkBlocks = contentDoc.select("h3, p, h4, div")
             val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
+            var isSeries = false
 
-            var hasEpisodes = false
-            for (block in episodeBlocks) {
+            for (block in linkBlocks) {
                 val text = block.text().trim()
-                val epMatch = Regex("""(E\d+|Episode\s*\d+)""", RegexOption.IGNORE_CASE).find(text)
+                val links = block.select("a[href*=/file/]")
+                if (links.isEmpty()) continue
 
+                val epMatch = Regex("""(E\d+|Episode\s*\d+)""", RegexOption.IGNORE_CASE).find(text)
                 if (epMatch != null) {
-                    hasEpisodes = true
-                    val epTitle = epMatch.groupValues[1].uppercase()
-                    val links = block.select("a[href*=/file/]")
+                    isSeries = true
+                    val epName = epMatch.groupValues[1].uppercase().replace("EPISODE", "E").replace(" ", "")
                     val rawLinks = mutableListOf<Pair<String, String>>()
 
                     for (link in links) {
-                        val quality = link.text().trim()
+                        val quality = link.text().trim().ifEmpty { "Link" }
                         val fileUrl = link.attr("href").trim()
                         if (fileUrl.isNotEmpty()) {
                             rawLinks.add(Pair(quality, fileUrl))
@@ -183,19 +185,22 @@ class PikaHDProvider : MainAPI() {
 
                     if (rawLinks.isNotEmpty()) {
                         val epList = seasonMap.getOrPut("Season 1") { mutableListOf() }
-                        epList.add(EpisodeItem(name = epTitle, rawGenerateLinks = rawLinks))
+                        val existing = epList.find { it.name.equals(epName, ignoreCase = true) }
+                        if (existing == null) {
+                            epList.add(EpisodeItem(name = epName, rawGenerateLinks = rawLinks))
+                        }
                     }
                 }
             }
 
-            if (hasEpisodes && seasonMap.isNotEmpty()) {
+            if (isSeries && seasonMap.isNotEmpty()) {
                 val seasonsList = seasonMap.map { (sName, epList) -> SeasonItem(name = sName, episodes = epList) }
                 return MediaStructure(isSeries = true, rawMovieLinks = emptyList(), seasons = seasonsList)
             }
 
-            val allFileLinks = contentDoc.select("a[href*=/file/]")
-            for (link in allFileLinks) {
-                val quality = link.text().trim().ifEmpty { "Download" }
+            val allDirectLinks = contentDoc.select("a[href*=/file/]")
+            for (link in allDirectLinks) {
+                val quality = link.text().trim().ifEmpty { "Direct Quality" }
                 val fileUrl = link.attr("href").trim()
                 if (fileUrl.isNotEmpty()) {
                     rawMovieLinks.add(Pair(quality, fileUrl))
@@ -219,7 +224,10 @@ class PikaHDProvider : MainAPI() {
 
             val apiUrl = "https://$domain/api/touchme/$slug?c=hubdrive_res"
             val apiResponse = Jsoup.connect(apiUrl)
-                .headers(getBaseHeaders("https://$domain/file/$slug"))
+                .userAgent(userAgent)
+                .header("Accept", "*/*")
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Referer", "https://$domain/file/$slug")
                 .header("Origin", "https://$domain")
                 .header("X-Requested-With", "XMLHttpRequest")
                 .header("Content-Type", "application/json")
@@ -237,18 +245,22 @@ class PikaHDProvider : MainAPI() {
             if (hubdriveUrl.isEmpty()) return null
 
             val driveDoc = Jsoup.connect(hubdriveUrl)
-                .headers(getBaseHeaders("https://$domain/"))
+                .headers(getBaseHeaders(mainUrl))
+                .followRedirects(true)
                 .timeout(25000)
                 .get()
 
+            var generateLink = ""
             val downloadBtn = driveDoc.selectFirst("a#download, a.btn-primary")
-            var generateLink = downloadBtn?.attr("href")?.trim() ?: ""
+            if (downloadBtn != null) {
+                generateLink = downloadBtn.attr("href").trim()
+            }
 
-            if (generateLink.isEmpty()) {
-                val hrefRegex = Regex("""href=["'](https?://[^"']*hubcloud\.php[^"']*)["']""")
-                val m = hrefRegex.find(driveDoc.html())
-                if (m != null) {
-                    generateLink = m.groupValues[1]
+            if (generateLink.isEmpty() || !generateLink.startsWith("http")) {
+                val scriptRegex = Regex("""(?:var\s+url\s*=\s*|href\s*=\s*)['"](https?://[^'"]*hubcloud\.php[^'"]*)['"]""")
+                val scriptMatch = scriptRegex.find(driveDoc.html())
+                if (scriptMatch != null) {
+                    generateLink = scriptMatch.groupValues[1]
                 }
             }
 
@@ -256,11 +268,23 @@ class PikaHDProvider : MainAPI() {
 
             val dlPageDoc = Jsoup.connect(generateLink)
                 .headers(getBaseHeaders(hubdriveUrl))
+                .followRedirects(true)
                 .timeout(25000)
                 .get()
 
+            var directUrl = ""
             val fslBtn = dlPageDoc.selectFirst("a#fsl, a.btn-success")
-            var directUrl = fslBtn?.attr("href")?.trim() ?: ""
+            if (fslBtn != null) {
+                directUrl = fslBtn.attr("href").trim()
+            }
+
+            if (directUrl.isEmpty() || !directUrl.startsWith("http")) {
+                val fslRegex = Regex("""<a[^>]+href=["'](https?://[^"']+)["'][^>]*id=["']fsl["']""")
+                val fslMatch = fslRegex.find(dlPageDoc.html())
+                if (fslMatch != null) {
+                    directUrl = fslMatch.groupValues[1]
+                }
+            }
 
             if (directUrl.isNotEmpty()) {
                 if (!directUrl.contains("r2.cloudflarestorage.com")) {
@@ -268,17 +292,6 @@ class PikaHDProvider : MainAPI() {
                     directUrl = "${directUrl}1$minutes"
                 }
                 return directUrl
-            }
-
-            val fallbackRegex = Regex("""href=["'](https?://[^"']+)["'][^>]*id=["']fsl["']""")
-            val fbMatch = fallbackRegex.find(dlPageDoc.html())
-            if (fbMatch != null) {
-                var extracted = fbMatch.groupValues[1]
-                if (!extracted.contains("r2.cloudflarestorage.com")) {
-                    val minutes = Calendar.getInstance().get(Calendar.MINUTE)
-                    extracted = "${extracted}1$minutes"
-                }
-                return extracted
             }
         } catch (e: Exception) {
             e.printStackTrace()
