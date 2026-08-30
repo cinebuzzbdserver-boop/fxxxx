@@ -1,10 +1,8 @@
 package com.flixora.providers
 
-import com.flixora.plugin.EpisodeItem
 import com.flixora.plugin.MainAPI
 import com.flixora.plugin.MediaStructure
 import com.flixora.plugin.MovieItem
-import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
 import org.jsoup.Connection
 import org.jsoup.Jsoup
@@ -118,6 +116,7 @@ class PikaHDProvider : MainAPI() {
     }
 
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
+        val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
             val response = Jsoup.connect(postUrl)
                 .headers(getBrowserHeaders(mainUrl))
@@ -143,74 +142,51 @@ class PikaHDProvider : MainAPI() {
             val targetHtml = if (postContent.isNotEmpty()) postContent else html
             val contentDoc = Jsoup.parse(targetHtml)
 
-            val linkBlocks = contentDoc.select("h3, p, h4, div, tr")
-            val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
-            val rawMovieLinks = mutableListOf<Pair<String, String>>()
-            var isSeries = false
+            val blocks = contentDoc.select("h3, p, h4, div, tr")
 
-            for (block in linkBlocks) {
+            for (block in blocks) {
                 val text = block.text().trim()
                 val links = block.select("a[href*=/file/]")
                 if (links.isEmpty()) continue
 
                 val epMatch = Regex("""(E\d+|Episode\s*\d+)""", RegexOption.IGNORE_CASE).find(text)
-                if (epMatch != null) {
-                    isSeries = true
-                    val epNumMatch = Regex("""\d+""").find(epMatch.value)?.value ?: "1"
-                    val epName = "Episode $epNumMatch"
-                    val rawLinks = mutableListOf<Pair<String, String>>()
+                val epPrefix = if (epMatch != null) "${epMatch.value.uppercase()} - " else ""
 
-                    for (link in links) {
-                        var quality = link.text().trim()
-                        if (quality.isEmpty() || quality == "||") {
-                            quality = "HD Quality"
-                        }
-                        val fileUrl = link.attr("href").trim()
-                        if (fileUrl.isNotEmpty() && rawLinks.none { it.second == fileUrl }) {
-                            val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$mainUrl$fileUrl"
-                            rawLinks.add(Pair(quality, fullUrl))
-                        }
+                for (link in links) {
+                    var quality = link.text().trim()
+                    if (quality.isEmpty() || quality == "||") {
+                        quality = "HD Quality"
+                    }
+                    val label = if (epPrefix.isNotEmpty() && !quality.startsWith("E", ignoreCase = true)) {
+                        "$epPrefix$quality"
+                    } else {
+                        quality
                     }
 
-                    if (rawLinks.isNotEmpty()) {
-                        val epList = seasonMap.getOrPut("Season 1") { mutableListOf() }
-                        val existing = epList.find { it.name.equals(epName, ignoreCase = true) }
-                        if (existing == null) {
-                            epList.add(EpisodeItem(name = epName, rawGenerateLinks = rawLinks))
-                        } else {
-                            val updatedLinks = existing.rawGenerateLinks.toMutableList()
-                            for (rLink in rawLinks) {
-                                if (updatedLinks.none { it.second == rLink.second }) {
-                                    updatedLinks.add(rLink)
-                                }
-                            }
-                            val index = epList.indexOf(existing)
-                            epList[index] = EpisodeItem(name = existing.name, rawGenerateLinks = updatedLinks)
-                        }
+                    val fileUrl = link.attr("href").trim()
+                    if (fileUrl.isNotEmpty() && rawMovieLinks.none { it.second == fileUrl }) {
+                        val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$mainUrl$fileUrl"
+                        rawMovieLinks.add(Pair(label, fullUrl))
                     }
                 }
             }
 
-            if (isSeries && seasonMap.isNotEmpty()) {
-                val seasonsList = seasonMap.map { (sName, epList) -> SeasonItem(name = sName, episodes = epList) }
-                return MediaStructure(isSeries = true, rawMovieLinks = emptyList(), seasons = seasonsList)
-            }
-
-            val allDirectLinks = contentDoc.select("a[href*=/file/]")
-            for (link in allDirectLinks) {
-                val quality = link.text().trim().ifEmpty { "Download" }
-                val fileUrl = link.attr("href").trim()
-                if (fileUrl.isNotEmpty() && rawMovieLinks.none { it.second == fileUrl }) {
-                    val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$mainUrl$fileUrl"
-                    rawMovieLinks.add(Pair(quality, fullUrl))
+            // Fallback: যদি ব্লকের ভেতর না পায়, ডকুমেন্টের সব /file/ লিঙ্ক কালেক্ট করা
+            if (rawMovieLinks.isEmpty()) {
+                val allDirectLinks = contentDoc.select("a[href*=/file/]")
+                for (link in allDirectLinks) {
+                    val quality = link.text().trim().ifEmpty { "Download" }
+                    val fileUrl = link.attr("href").trim()
+                    if (fileUrl.isNotEmpty() && rawMovieLinks.none { it.second == fileUrl }) {
+                        val fullUrl = if (fileUrl.startsWith("http")) fileUrl else "$mainUrl$fileUrl"
+                        rawMovieLinks.add(Pair(quality, fullUrl))
+                    }
                 }
             }
-
-            return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return MediaStructure(isSeries = false, rawMovieLinks = emptyList(), seasons = emptyList())
+        return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
     }
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
