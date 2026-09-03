@@ -18,7 +18,6 @@ class FibWatchProvider : MainAPI() {
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
     private fun getBrowserDoc(targetUrl: String): Document {
-        // সাইটের 403 বট প্রোটেকশন বাইপাস করার জন্য সরাসরি প্রক্সি ওয়ার্কারের মাধ্যমে পেজ ফেচ
         val fetchUrl = if (targetUrl.startsWith(proxyPrefix)) targetUrl else "$proxyPrefix$targetUrl"
         
         return Jsoup.connect(fetchUrl)
@@ -76,14 +75,21 @@ class FibWatchProvider : MainAPI() {
             val cards = doc.select(".video-latest-list")
 
             for (card in cards) {
-                val thumbAnchor = card.selectFirst(".video-thumb a")
-                val titleAnchor = card.selectFirst(".video-title a")
+                // লিঙ্ক সিলেকশন: প্রথমে থাম্ব লিঙ্ক, না পেলে ব্লার ডিটেইলসের লিঙ্ক
+                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim()
+                    ?: card.selectFirst(".center_abs a")?.attr("href")?.trim()
+                    ?: card.selectFirst("a[href*='/watch/']")?.attr("href")?.trim()
+                    ?: ""
 
-                val rawUrl = thumbAnchor?.attr("href")?.trim() ?: titleAnchor?.attr("href")?.trim() ?: ""
+                // ইমেজ সিলেকশন
                 val imgElement = card.selectFirst(".video-thumb img")
                 val image = imgElement?.attr("src")?.trim() ?: ""
-                val title = card.selectFirst(".video-title p.hptag")?.text()?.trim()
-                    ?: titleAnchor?.text()?.trim()
+
+                // টাইটেল সিলেকশন: হোমপেজের স্ট্রাকচার অনুযায়ী channel_details p.hptag অথবা img alt
+                val title = card.selectFirst(".channel_details p.hptag")?.attr("title")?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst(".channel_details p.hptag")?.text()?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst(".video-title p.hptag")?.text()?.trim()?.ifEmpty { null }
+                    ?: imgElement?.attr("alt")?.trim()
                     ?: ""
 
                 if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
@@ -122,14 +128,18 @@ class FibWatchProvider : MainAPI() {
             val cards = doc.select(".video-latest-list")
 
             for (card in cards) {
-                val thumbAnchor = card.selectFirst(".video-thumb a")
-                val titleAnchor = card.selectFirst(".video-title a")
+                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim()
+                    ?: card.selectFirst(".video-title a")?.attr("href")?.trim()
+                    ?: card.selectFirst("a[href*='/watch/']")?.attr("href")?.trim()
+                    ?: ""
 
-                val rawUrl = thumbAnchor?.attr("href")?.trim() ?: titleAnchor?.attr("href")?.trim() ?: ""
                 val imgElement = card.selectFirst(".video-thumb img")
                 val image = imgElement?.attr("src")?.trim() ?: ""
-                val title = card.selectFirst(".video-title p.hptag")?.text()?.trim()
-                    ?: titleAnchor?.text()?.trim()
+
+                val title = card.selectFirst(".video-title p.hptag")?.text()?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst(".channel_details p.hptag")?.attr("title")?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst(".channel_details p.hptag")?.text()?.trim()?.ifEmpty { null }
+                    ?: imgElement?.attr("alt")?.trim()
                     ?: ""
 
                 if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
