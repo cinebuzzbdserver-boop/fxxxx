@@ -6,6 +6,7 @@ import com.flixora.plugin.MediaStructure
 import com.flixora.plugin.MovieItem
 import com.flixora.plugin.SeasonItem
 import com.flixora.plugin.StreamItem
+import org.jsoup.Connection
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 
@@ -14,7 +15,32 @@ class FibWatchProvider : MainAPI() {
     override var mainUrl = "https://fibwatch.art"
 
     private val proxyPrefix = "https://wandering-glitter-0f39.blmbd.workers.dev/"
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+    private val browserHeaders = mapOf(
+        "User-Agent" to userAgent,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language" to "en-US,en;q=0.9,bn;q=0.8",
+        "Accept-Encoding" to "gzip, deflate, br",
+        "Sec-Ch-Ua" to "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\"",
+        "Sec-Ch-Ua-Mobile" to "?0",
+        "Sec-Ch-Ua-Platform" to "\"Windows\"",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "none",
+        "Sec-Fetch-User" to "?1",
+        "Upgrade-Insecure-Requests" to "1",
+        "Cache-Control" to "max-age=0"
+    )
+
+    private fun getClient(url: String, referrer: String = mainUrl): Connection {
+        return Jsoup.connect(url)
+            .headers(browserHeaders)
+            .referrer(referrer)
+            .followRedirects(true)
+            .ignoreHttpErrors(true)
+            .timeout(20000)
+    }
 
     private fun wrapProxy(url: String): String {
         val trimmed = url.trim()
@@ -30,12 +56,7 @@ class FibWatchProvider : MainAPI() {
                 "$mainUrl/videos/latest?page_id=$page"
             }
 
-            val doc = Jsoup.connect(targetUrl)
-                .userAgent(userAgent)
-                .referrer(mainUrl)
-                .timeout(15000)
-                .get()
-
+            val doc = getClient(targetUrl, "$mainUrl/").get()
             val cards = doc.select(".video-latest-list")
 
             for (card in cards) {
@@ -81,12 +102,7 @@ class FibWatchProvider : MainAPI() {
                 "$mainUrl/search?keyword=$encodedQuery&page_id=$page"
             }
 
-            val doc = Jsoup.connect(targetUrl)
-                .userAgent(userAgent)
-                .referrer(mainUrl)
-                .timeout(15000)
-                .get()
-
+            val doc = getClient(targetUrl, "$mainUrl/").get()
             val cards = doc.select(".video-latest-list")
 
             for (card in cards) {
@@ -124,11 +140,7 @@ class FibWatchProvider : MainAPI() {
 
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         try {
-            val doc = Jsoup.connect(postUrl)
-                .userAgent(userAgent)
-                .referrer(mainUrl)
-                .timeout(15000)
-                .get()
+            val doc = getClient(postUrl, "$mainUrl/videos/latest").get()
 
             val videoId = doc.selectFirst("#see-more-res")?.attr("data-vid")?.trim()
                 ?: doc.selectFirst("[data-vid]")?.attr("data-vid")?.trim()
@@ -136,14 +148,20 @@ class FibWatchProvider : MainAPI() {
 
             val currentRes = doc.selectFirst(".available-res .res-btn.selected")?.text()?.trim()?.ifEmpty { null } ?: "Default"
 
-            // ১. সিরিজ / এপিসোড চেক
+            // ১. সিরিজ / এপিসোড হ্যান্ডলিং (AJAX রিকোয়েস্ট)
             if (videoId.isNotEmpty()) {
                 val epApiUrl = "$mainUrl/ajax/episodes.php?video_id=$videoId"
                 val epResponse = Jsoup.connect(epApiUrl)
-                    .userAgent(userAgent)
+                    .headers(browserHeaders)
+                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Sec-Fetch-Dest", "empty")
+                    .header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin")
                     .referrer(postUrl)
                     .ignoreContentType(true)
-                    .timeout(15000)
+                    .ignoreHttpErrors(true)
+                    .timeout(20000)
                     .execute()
 
                 val epJson = epResponse.body().trim()
@@ -180,17 +198,23 @@ class FibWatchProvider : MainAPI() {
                 }
             }
 
-            // ২. মুভি কোয়ালিটি অপশন
+            // ২. মুভি কোয়ালিটি হ্যান্ডলিং
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
             rawMovieLinks.add(Pair(currentRes, postUrl))
 
             if (videoId.isNotEmpty()) {
                 val resApiUrl = "$mainUrl/ajax/resolution_switcher.php?video_id=$videoId"
                 val resResponse = Jsoup.connect(resApiUrl)
-                    .userAgent(userAgent)
+                    .headers(browserHeaders)
+                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Sec-Fetch-Dest", "empty")
+                    .header("Sec-Fetch-Mode", "cors")
+                    .header("Sec-Fetch-Site", "same-origin")
                     .referrer(postUrl)
                     .ignoreContentType(true)
-                    .timeout(15000)
+                    .ignoreHttpErrors(true)
+                    .timeout(20000)
                     .execute()
 
                 val resJson = resResponse.body().trim()
@@ -219,11 +243,7 @@ class FibWatchProvider : MainAPI() {
 
     override suspend fun resolveDirectLink(generateUrl: String): String? {
         try {
-            val doc = Jsoup.connect(generateUrl)
-                .userAgent(userAgent)
-                .referrer(mainUrl)
-                .timeout(15000)
-                .get()
+            val doc = getClient(generateUrl, "$mainUrl/videos/latest").get()
 
             val htmlContent = doc.html()
             val videoUrlRegex = Regex("""var\s+VIDEO_URL\s*=\s*["']([^"']+)["']""")
