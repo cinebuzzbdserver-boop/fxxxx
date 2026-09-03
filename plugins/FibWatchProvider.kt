@@ -13,7 +13,13 @@ class FibWatchProvider : MainAPI() {
     override var name = "FibWatch"
     override var mainUrl = "https://fibwatch.art"
 
+    private val proxyPrefix = "https://wandering-glitter-0f39.blmbd.workers.dev/"
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+    private fun wrapProxy(url: String): String {
+        val trimmed = url.trim()
+        return if (trimmed.isNotEmpty()) "$proxyPrefix$trimmed" else ""
+    }
 
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
@@ -48,7 +54,7 @@ class FibWatchProvider : MainAPI() {
                     list.add(
                         MovieItem(
                             title = title,
-                            image = image,
+                            image = wrapProxy(image),
                             url = fullUrl,
                             imageSize = "16:9"
                         )
@@ -99,7 +105,7 @@ class FibWatchProvider : MainAPI() {
                     list.add(
                         MovieItem(
                             title = title,
-                            image = image,
+                            image = wrapProxy(image),
                             url = fullUrl,
                             imageSize = "16:9"
                         )
@@ -124,15 +130,13 @@ class FibWatchProvider : MainAPI() {
                 .timeout(15000)
                 .get()
 
-            // Video ID নির্ধারণ (data-vid অথবা resolution button থেকে)
             val videoId = doc.selectFirst("#see-more-res")?.attr("data-vid")?.trim()
                 ?: doc.selectFirst("[data-vid]")?.attr("data-vid")?.trim()
                 ?: ""
 
-            // পেজের ডিফল্ট সিলেক্টেড কোয়ালিটি
             val currentRes = doc.selectFirst(".available-res .res-btn.selected")?.text()?.trim()?.ifEmpty { null } ?: "Default"
 
-            // ১. এপিসোড রিকোয়েস্ট (Series Check)
+            // ১. সিরিজ / এপিসোড চেক
             if (videoId.isNotEmpty()) {
                 val epApiUrl = "$mainUrl/ajax/episodes.php?video_id=$videoId"
                 val epResponse = Jsoup.connect(epApiUrl)
@@ -156,7 +160,6 @@ class FibWatchProvider : MainAPI() {
                         if (relUrl.isNotEmpty()) {
                             val epFullUrl = if (relUrl.startsWith("http")) relUrl else "$mainUrl$relUrl"
                             
-                            // Season ডিটেকশন (e.g., S05E01 -> Season 5 অথবা ডিফল্ট Season 1)
                             val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(display)
                             val seasonName = if (seasonMatch != null) {
                                 "Season " + seasonMatch.groupValues[1].toInt()
@@ -177,7 +180,7 @@ class FibWatchProvider : MainAPI() {
                 }
             }
 
-            // ২. মুভি কোয়ালিটি (isSeries = false)
+            // ২. মুভি কোয়ালিটি অপশন
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
             rawMovieLinks.add(Pair(currentRes, postUrl))
 
@@ -200,7 +203,6 @@ class FibWatchProvider : MainAPI() {
                     val relUrl = match.groupValues[2].replace("\\/", "/").trim()
                     val isSelected = match.groupValues[3].toBoolean()
 
-                    // কারেন্ট/সিলেক্টেড কোয়ালিটি বাদে বাকি কোয়ালিটি অ্যাড করা
                     if (!isSelected && relUrl.isNotEmpty() && !res.equals("See More", ignoreCase = true)) {
                         val fullUrl = if (relUrl.startsWith("http")) relUrl else "$mainUrl$relUrl"
                         rawMovieLinks.add(Pair(res, fullUrl))
@@ -224,14 +226,13 @@ class FibWatchProvider : MainAPI() {
                 .get()
 
             val htmlContent = doc.html()
-
-            // Script ব্লকের ভেতরের VIDEO_URL ভ্যালু পার্সিং
             val videoUrlRegex = Regex("""var\s+VIDEO_URL\s*=\s*["']([^"']+)["']""")
             val match = videoUrlRegex.find(htmlContent)
             val directStreamUrl = match?.groupValues?.get(1)?.trim() ?: ""
 
             if (directStreamUrl.isNotEmpty()) {
-                return directStreamUrl.replace("\\/", "/")
+                val cleanedUrl = directStreamUrl.replace("\\/", "/")
+                return wrapProxy(cleanedUrl)
             }
         } catch (e: Exception) {
             e.printStackTrace()
