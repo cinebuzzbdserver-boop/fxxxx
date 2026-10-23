@@ -35,12 +35,27 @@ class MMSVibexProvider : MainAPI {
             val articles = doc.select("article.thumb-block")
 
             for (article in articles) {
+                // ১. ভিডিও কাউন্ট টেক্সট অথবা এলবাম/গ্রুপ ক্লাস থাকলে ইগনোর করবে
+                if (article.selectFirst(".video-count-text") != null || 
+                    article.hasClass("homepage-pinned-album") || 
+                    article.selectFirst(".actor-title") != null) {
+                    continue
+                }
+
                 val anchor = article.selectFirst("a") ?: continue
                 val rawUrl = anchor.attr("href").trim()
                 if (rawUrl.isEmpty()) continue
 
+                // ২. actor / actors গ্রুপ রিলেটেড লিংক ইগনোর করবে
+                if (rawUrl.contains("/actor/") || rawUrl.contains("?actors=")) {
+                    continue
+                }
+
                 val imgElement = article.selectFirst("img.video-main-thumb") ?: article.selectFirst("img")
-                val image = imgElement?.attr("src")?.trim().orEmpty()
+                var image = imgElement?.attr("data-src")?.trim().orEmpty()
+                if (image.isEmpty() || image.contains("px.gif")) {
+                    image = imgElement?.attr("src")?.trim().orEmpty()
+                }
 
                 val title = article.selectFirst(".entry-header .title")?.text()?.trim()
                     ?: anchor.attr("title").trim().ifEmpty { null }
@@ -54,7 +69,7 @@ class MMSVibexProvider : MainAPI {
                         title = title,
                         image = image,
                         url = fullUrl,
-                        isPoster = false, // 16:9 ব্যানার থাম্বনেইল
+                        isPoster = false,
                         referer = "$mainUrl/"
                     )
                 )
@@ -79,12 +94,27 @@ class MMSVibexProvider : MainAPI {
             val articles = doc.select("article.thumb-block")
 
             for (article in articles) {
+                // ১. ভিডিও কাউন্ট টেক্সট অথবা এলবাম/গ্রুপ ক্লাস থাকলে ইগনোর করবে
+                if (article.selectFirst(".video-count-text") != null || 
+                    article.hasClass("homepage-pinned-album") || 
+                    article.selectFirst(".actor-title") != null) {
+                    continue
+                }
+
                 val anchor = article.selectFirst("a") ?: continue
                 val rawUrl = anchor.attr("href").trim()
                 if (rawUrl.isEmpty()) continue
 
+                // ২. actor / actors গ্রুপ রিলেটেড লিংক ইগনোর করবে
+                if (rawUrl.contains("/actor/") || rawUrl.contains("?actors=")) {
+                    continue
+                }
+
                 val imgElement = article.selectFirst("img.video-main-thumb") ?: article.selectFirst("img")
-                val image = imgElement?.attr("src")?.trim().orEmpty()
+                var image = imgElement?.attr("data-src")?.trim().orEmpty()
+                if (image.isEmpty() || image.contains("px.gif")) {
+                    image = imgElement?.attr("src")?.trim().orEmpty()
+                }
 
                 val title = article.selectFirst(".entry-header .title")?.text()?.trim()
                     ?: anchor.attr("title").trim().ifEmpty { null }
@@ -128,15 +158,12 @@ class MMSVibexProvider : MainAPI {
         try {
             val doc = getBrowserDoc(generateUrl)
             
-            // ১. HTML5 <video><source src="..."> ট্যাগ চেক
             var directStreamUrl = doc.selectFirst("video#wpst-video source, video source")?.attr("src")?.trim().orEmpty()
 
-            // ২. যদি সোর্স ট্যাগ না পায়, তাহলে mvp-player এর ডিরেক্ট বাটন চেক
             if (directStreamUrl.isEmpty()) {
                 directStreamUrl = doc.selectFirst("a.mvp-button.mvp-center")?.attr("href")?.trim().orEmpty()
             }
 
-            // ৩. ব্যাকআপ: পেজের স্ক্রিপ্ট বা সোর্স থেকে .mp4 ইউআরএল Regex দিয়ে এক্সট্র্যাক্ট করা
             if (directStreamUrl.isEmpty()) {
                 val mp4Regex = Regex("""https?://[^\s"'<>]+\.mp4(?:\?[^\s"'<>]*)?""")
                 directStreamUrl = mp4Regex.find(doc.html())?.value?.trim().orEmpty()
