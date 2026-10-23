@@ -8,11 +8,12 @@ import com.moviefy.stream.ui.screens.SeasonItem
 import com.moviefy.stream.ui.screens.StreamItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.jsoup.Jsoup
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
-import java.util.concurrent.TimeUnit
 
 class FibWatchProvider : MainAPI {
     override var name = "FibWatch"
@@ -20,51 +21,65 @@ class FibWatchProvider : MainAPI {
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
-
-    private suspend fun fetchHtml(url: String): String = withContext(Dispatchers.IO) {
+    private suspend fun fetchHtml(targetUrl: String): String = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", userAgent)
-                .header("Referer", "$mainUrl/")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .header("sec-ch-ua", "\"Chromium\";v=\"153\", \"Google Chrome\";v=\"153\", \"Not-A.Brand\";v=\"99\"")
-                .header("sec-ch-ua-mobile", "?1")
-                .header("sec-ch-ua-platform", "\"Android\"")
-                .header("Upgrade-Insecure-Requests", "1")
-                .header("Sec-Fetch-Site", "none")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-User", "?1")
-                .header("Sec-Fetch-Dest", "document")
-                .build()
+            val url = URL(targetUrl)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 20000
+            conn.readTimeout = 20000
+            conn.instanceFollowRedirects = true
+            
+            conn.setRequestProperty("User-Agent", userAgent)
+            conn.setRequestProperty("Referer", "$mainUrl/")
+            conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            conn.setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            conn.setRequestProperty("sec-ch-ua", "\"Chromium\";v=\"153\", \"Google Chrome\";v=\"153\", \"Not-A.Brand\";v=\"99\"")
+            conn.setRequestProperty("sec-ch-ua-mobile", "?1")
+            conn.setRequestProperty("sec-ch-ua-platform", "\"Android\"")
+            conn.setRequestProperty("Upgrade-Insecure-Requests", "1")
+            conn.setRequestProperty("Sec-Fetch-Site", "none")
+            conn.setRequestProperty("Sec-Fetch-Mode", "navigate")
+            conn.setRequestProperty("Sec-Fetch-User", "?1")
+            conn.setRequestProperty("Sec-Fetch-Dest", "document")
 
-            httpClient.newCall(req).execute().use { resp ->
-                resp.body?.string() ?: ""
+            val reader = BufferedReader(InputStreamReader(conn.inputStream))
+            val response = StringBuilder()
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                response.append(line)
             }
+            reader.close()
+            conn.disconnect()
+            response.toString()
         } catch (_: Exception) {
             ""
         }
     }
 
-    private suspend fun fetchJson(url: String, refererUrl: String): String = withContext(Dispatchers.IO) {
+    private suspend fun fetchJson(targetUrl: String, refererUrl: String): String = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", userAgent)
-                .header("Referer", refererUrl)
-                .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                .header("X-Requested-With", "XMLHttpRequest")
-                .build()
+            val url = URL(targetUrl)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 20000
+            conn.readTimeout = 20000
+            conn.instanceFollowRedirects = true
 
-            httpClient.newCall(req).execute().use { resp ->
-                resp.body?.string()?.trim() ?: ""
+            conn.setRequestProperty("User-Agent", userAgent)
+            conn.setRequestProperty("Referer", refererUrl)
+            conn.setRequestProperty("Accept", "application/json, text/javascript, */*; q=0.01")
+            conn.setRequestProperty("X-Requested-With", "XMLHttpRequest")
+
+            val reader = BufferedReader(InputStreamReader(conn.inputStream))
+            val response = StringBuilder()
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                response.append(line)
             }
+            reader.close()
+            conn.disconnect()
+            response.toString().trim()
         } catch (_: Exception) {
             ""
         }
@@ -78,7 +93,6 @@ class FibWatchProvider : MainAPI {
             if (html.isEmpty()) return emptyList()
 
             val doc = Jsoup.parse(html)
-            // অরিজিনাল সিলেক্টর লজিক
             val elements = doc.select(".video-wrapper")
 
             for (element in elements) {
