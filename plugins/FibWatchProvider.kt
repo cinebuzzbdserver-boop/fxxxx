@@ -20,7 +20,7 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 class FibWatchProvider : MainAPI {
-    override var name = "FibWatch"
+    override var name = "FibWatch2"
     override var mainUrl = "https://fibwatch.art"
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
