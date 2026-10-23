@@ -16,14 +16,16 @@ class MovieLinkBDProvider : MainAPI {
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
 
-    private suspend fun getBrowserDoc(targetUrl: String): Document = withContext(Dispatchers.IO) {
+    private suspend fun getBrowserDoc(targetUrl: String, refererUrl: String = "$mainUrl/"): Document = withContext(Dispatchers.IO) {
         Jsoup.connect(targetUrl)
             .userAgent(userAgent)
-            .referrer("$mainUrl/")
+            .referrer(refererUrl)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Sec-Fetch-Mode", "navigate")
             .ignoreContentType(true)
             .ignoreHttpErrors(true)
-            .timeout(20000)
+            .timeout(25000)
             .get()
     }
 
@@ -119,29 +121,30 @@ class MovieLinkBDProvider : MainAPI {
         val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
             val doc = getBrowserDoc(postUrl)
-            
-            // পোস্ট পেজের ডাউনলোড বাটনগুলো ফিল্টার করা
             val dlButtons = doc.select("a[data-dl], .mlbd-download-button-wrap a")
 
             for (btn in dlButtons) {
-                val btnText = btn.selectFirst(".btn-text")?.text()?.trim()
-                    ?: btn.text().trim()
-
+                val btnText = btn.selectFirst(".btn-text")?.text()?.trim() ?: btn.text().trim()
                 val label = Regex("""\[(.*?)\]""").find(btnText)?.groupValues?.get(1)
                     ?: btnText.replace("Download", "").trim().ifEmpty { "Download Link" }
 
-                // data-dl টোকেন অথবা href থেকে রিলেটিভ পাথ বের করা
-                val href = btn.attr("href").trim()
-                val targetPath = if (href.isNotEmpty() && href != "#") {
-                    href
-                } else {
-                    val token = btn.attr("data-dl").trim()
-                    if (token.isNotEmpty()) "/download?token=${URLEncoder.encode(token, "UTF-8")}" else ""
+                val token = btn.attr("data-dl").trim()
+                val ds = btn.attr("data-ds").trim()
+                val rawHref = btn.attr("href").trim()
+
+                // স্টেপ ১: ডাউনলোড টোকেন বা ইউআরএল নির্ধারণ
+                val targetUrl = when {
+                    token.isNotEmpty() -> {
+                        "$mainUrl/dl?data=${URLEncoder.encode(token, "UTF-8")}&ds=$ds"
+                    }
+                    rawHref.isNotEmpty() && rawHref != "#" -> {
+                        if (rawHref.startsWith("http")) rawHref else "$mainUrl$rawHref"
+                    }
+                    else -> ""
                 }
 
-                if (targetPath.isNotEmpty()) {
-                    val fullTargetUrl = if (targetPath.startsWith("http")) targetPath else "$mainUrl$targetPath"
-                    rawMovieLinks.add(Pair(label, fullTargetUrl))
+                if (targetUrl.isNotEmpty()) {
+                    rawMovieLinks.add(Pair(label, targetUrl))
                 }
             }
 
@@ -162,30 +165,53 @@ class MovieLinkBDProvider : MainAPI {
 
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? {
         try {
-            // স্টেপ ১: ডাউনলোড হাব পেজ ওপেন করা (যেখানে One Click বাটন থাকে)
-            val doc = getBrowserDoc(generateUrl)
+            // স্টেপ ১: টোকেন বা ডাউনলোড হাব পেজে রিকোয়েস্ট পাঠানো
+            val hubDoc = getBrowserDoc(generateUrl, refererUrl = "$mainUrl/")
 
-            var intermediateUrl = ""
-
-            // ১. One Click Download বাটন খোঁজা
-            val oneClickBtn = doc.selectFirst("a.dlh-arow[data-host='oneclick'], a[href*='/file/']")
+            // স্টেপ ২: One Click Download লিঙ্ক বের করা
+            var oneClickUrl = ""
+            val oneClickBtn = hubDoc.selectFirst("a.dlh-arow[data-host='oneclick'], a[href*='/file/'], a[data-btn='One Click Download']")
             if (oneClickBtn != null) {
                 val href = oneClickBtn.attr("href").trim()
-                intermediateUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                oneClickUrl = if (href.startsWith("http")) href else "$mainUrl$href"
             }
 
-            // স্টেপ ২: One Click লিঙ্ক ওপেন করে ফাইনাল Ultra/Cloud ডিরেক্ট লিঙ্ক রিভল্ভ করা
-            val finalDoc = if (intermediateUrl.isNotEmpty()) getBrowserDoc(intermediateUrl) else doc
+            // যদি হাব পেজে বাটন না থাকে, সরাসরি generateUrl কেই ফাইনাল পেজ ধরে চেষ্টা করা
+            val fileDoc = if (oneClickUrl.isNotEmpty()) {
+                getBrowserDoc(oneClickUrl, refererUrl = generateUrl)
+            } else {
+                hubDoc
+            }
 
-            // ২. Ultra Speed বা Cloudflare R2 / Fast Cloud ডিরেক্ট লিঙ্ক ফিল্টার
-            val directStreamAnchor = finalDoc.selectFirst("a.btn-ultra[data-host='ultra'], a.btn-cloud[data-host='instant'], a[data-mlbd-click-ad='file-final-download']")
+            // স্টেপ ৩: ফাইনাল পেজ থেকে ULTRA SPEED বা FAST CLOUD লিঙ্ক এক্সট্র্যাক্ট করা
+            var directStreamUrl = ""
 
-            var directStreamUrl = directStreamAnchor?.attr("href")?.trim().orEmpty()
+            // ৩.১: Ultra Speed লিঙ্ক খোঁজা
+            val ultraBtn = fileDoc.selectFirst("a.btn-ultra[data-host='ultra'], a[data-btn*='ULTRA']")
+            if (ultraBtn != null && ultraBtn.attr("href").trim().startsWith("http")) {
+                directStreamUrl = ultraBtn.attr("href").trim()
+            }
 
-            // ৩. ব্যাকআপ: যদি নির্দিষ্ট ক্লাস না মেলে তবে R2 ডিরেক্ট স্টোরেজ লিঙ্ক চেক
+            // ৩.২: Fast Cloud লিঙ্ক খোঁজা (Ultra না থাকলে)
+            if (directStreamUrl.isEmpty()) {
+                val cloudBtn = fileDoc.selectFirst("a.btn-cloud[data-host='instant'], a[data-btn*='Fast Cloud']")
+                if (cloudBtn != null && cloudBtn.attr("href").trim().startsWith("http")) {
+                    directStreamUrl = cloudBtn.attr("href").trim()
+                }
+            }
+
+            // ৩.৩: data-mlbd-click-ad অথবা যেকোনো R2 ডিরেক্ট স্টোরেজ লিঙ্ক
+            if (directStreamUrl.isEmpty()) {
+                val anyFinalBtn = fileDoc.selectFirst("a[data-mlbd-click-ad='file-final-download']")
+                if (anyFinalBtn != null && anyFinalBtn.attr("href").trim().startsWith("http")) {
+                    directStreamUrl = anyFinalBtn.attr("href").trim()
+                }
+            }
+
+            // ৩.৪: ব্যাকআপ রেজেক্স (Cloudflare R2 / Cloud Storage)
             if (directStreamUrl.isEmpty()) {
                 val r2Regex = Regex("""https?://[^\s"'<>]+\.(?:r2\.dev|cloudflarestorage\.com)[^\s"'<>]*""")
-                directStreamUrl = r2Regex.find(finalDoc.html())?.value?.trim().orEmpty()
+                directStreamUrl = r2Regex.find(fileDoc.html())?.value?.trim().orEmpty()
             }
 
             if (directStreamUrl.isNotEmpty()) {
