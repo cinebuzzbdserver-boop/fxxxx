@@ -1,4 +1,4 @@
-name: Build Plugins to FLX Binaries
+name: Build Plugins to MVF Binaries
 
 on:
   push:
@@ -9,14 +9,14 @@ permissions:
   contents: write
 
 jobs:
-  build-flx:
+  build-mvf:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -28,25 +28,28 @@ jobs:
           curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
-      - name: Build Plugins to FLX
+      - name: Build Plugins to MVF
         run: |
           ANDROID_JAR=$(ls -1 /usr/local/lib/android/sdk/platforms/android-*/android.jar | tail -n 1)
           D8_TOOL=$(ls -1 /usr/local/lib/android/sdk/build-tools/*/d8 | tail -n 1)
 
-          mkdir -p src/com/flixora/plugin
-          cat << 'EOF' > src/com/flixora/plugin/MainAPI.kt
-          package com.flixora.plugin
+          mkdir -p src/com/moviefy/stream/ui/screens
+          cat << 'EOF' > src/com/moviefy/stream/ui/screens/MainAPI.kt
+          package com.moviefy.stream.ui.screens
 
           data class MovieItem(
               val title: String,
               val image: String,
               val url: String,
-              val imageSize: String
+              val isPoster: Boolean,
+              val referer: String?
           )
 
           data class StreamItem(
               val quality: String,
-              val streamUrl: String
+              val streamUrl: String,
+              val headers: Map<String, String>? = null,
+              val subtitleUrl: String? = null
           )
 
           data class EpisodeItem(
@@ -65,21 +68,13 @@ jobs:
               val seasons: List<SeasonItem>
           )
 
-          abstract class MainAPI {
-              abstract var name: String
-              abstract var mainUrl: String
-              abstract suspend fun getMainPage(page: Int): List<MovieItem>
-              abstract suspend fun search(query: String): List<MovieItem>
-              open suspend fun search(query: String, page: Int): List<MovieItem> {
-                  return if (page <= 1) search(query) else emptyList()
-              }
-              abstract suspend fun loadLinks(postUrl: String): List<StreamItem>
-              open suspend fun loadMediaStructure(postUrl: String): MediaStructure {
-                  return MediaStructure(isSeries = false, rawMovieLinks = emptyList(), seasons = emptyList())
-              }
-              open suspend fun resolveDirectLink(generateUrl: String): String? {
-                  return null
-              }
+          interface MainAPI {
+              var name: String
+              var mainUrl: String
+              suspend fun getMainPage(page: Int): List<MovieItem>
+              suspend fun search(query: String, page: Int): List<MovieItem>
+              suspend fun loadMediaStructure(postUrl: String): MediaStructure
+              suspend fun resolveDirectLink(generateUrl: String): StreamItem?
           }
           EOF
 
@@ -88,9 +83,12 @@ jobs:
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
-              ./kotlinc/bin/kotlinc "$file" src/com/flixora/plugin/MainAPI.kt \
+              ./kotlinc/bin/kotlinc "$file" src/com/moviefy/stream/ui/screens/MainAPI.kt \
                 -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
+
+              # অ্যাপের সাথে ক্লাস কনফ্লিক্ট এড়াতে জার থেকে শুধু ইন্টারফেস ও ডাটা ক্লাসগুলো রিমুভ করা হচ্ছে
+              zip -q -d "${outputName}_temp.jar" "com/moviefy/stream/ui/screens/*" || true
 
               mkdir -p "dex_out_${outputName}"
               $D8_TOOL --release --min-api 21 \
@@ -101,7 +99,7 @@ jobs:
                 "${outputName}_temp.jar"
 
               if [ -f "dex_out_${outputName}/classes.dex" ]; then
-                mv "dex_out_${outputName}/classes.dex" "${outputName}.flx"
+                mv "dex_out_${outputName}/classes.dex" "${outputName}.mvf"
               fi
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
@@ -109,9 +107,9 @@ jobs:
 
           rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar
 
-      - name: Commit and Push FLX Binaries
+      - name: Commit and Push MVF Binaries
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.flx || true
-          git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .flx binaries" && git push)
+          git add *.mvf || true
+          git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .mvf binaries" && git push)
