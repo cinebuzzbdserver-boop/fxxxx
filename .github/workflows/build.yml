@@ -23,19 +23,23 @@ jobs:
 
       - name: Compile and Build MVF
         run: |
-          set -e
+          # ডিবাগিংয়ের জন্য কমান্ড ট্রেসিং অন করা হলো
+          set -x
           
-          echo "Downloading Kotlin Compiler..."
+          echo "=== 1. Downloading Kotlin Compiler & Dependencies ==="
           curl -sL https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip -o kotlinc.zip
           unzip -q kotlinc.zip
 
-          echo "Downloading Dependencies..."
           curl -sL https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar -o jsoup.jar
           curl -sL https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar -o coroutines.jar
 
           ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -name "android.jar" | sort -V | tail -n 1)
           D8_TOOL=$(find "$ANDROID_HOME/build-tools" -name "d8" | sort -V | tail -n 1)
 
+          echo "Using Android Jar: $ANDROID_JAR"
+          echo "Using D8 Tool: $D8_TOOL"
+
+          echo "=== 2. Creating MainAPI Stub ==="
           mkdir -p src/com/moviefy/stream/ui/screens
           cat << 'EOF' > src/com/moviefy/stream/ui/screens/MainAPI.kt
           package com.moviefy.stream.ui.screens
@@ -44,7 +48,7 @@ jobs:
           data class StreamItem(val quality: String, val streamUrl: String, val headers: Map<String, String>? = null, val subtitleUrl: String? = null)
           data class EpisodeItem(val name: String, val rawGenerateLinks: List<Pair<String, String>>)
           data class SeasonItem(val name: String, val episodes: List<EpisodeItem>)
-          data class MediaStructure(val isSeries: Boolean, val rawMovieLinks: List<Pair<String, String>>, val seasons: List<SeasonItem>)
+          data class MediaStructure(val isSeries: Boolean, val rawMovieLinks: List<Pair<String, String>>, vlar seasons: List<SeasonItem>)
 
           interface MainAPI {
               var name: String
@@ -58,11 +62,14 @@ jobs:
 
           ./kotlinc/bin/kotlinc src/com/moviefy/stream/ui/screens/MainAPI.kt -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" -d "api_stub.jar"
 
+          echo "=== 3. Compiling Providers ==="
           shopt -s nullglob
           for file in plugins/*.kt *.kt; do
             if [ -f "$file" ] && [[ "$(basename "$file")" != "MainAPI.kt" ]]; then
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
+
+              echo "Processing: $file -> ${outputName}.mvf"
 
               ./kotlinc/bin/kotlinc "$file" -cp "api_stub.jar:jsoup.jar:coroutines.jar:$ANDROID_JAR" -d "${outputName}_temp.jar"
 
@@ -71,6 +78,10 @@ jobs:
 
               if [ -f "dex_out_${outputName}/classes.dex" ]; then
                 mv "dex_out_${outputName}/classes.dex" "${outputName}.mvf"
+                echo "Successfully built ${outputName}.mvf"
+              else
+                echo "Error: Failed to generate dex for $file"
+                exit 1
               fi
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
@@ -83,4 +94,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add *.mvf || true
-          git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .mvf binaries" && git push)
+          git diff --staged --quiet || (git commit -m "Auto-compiled plugins to .mvf binaries" && git push || echo "Push skipped due to permissions/branch protection")
