@@ -2,7 +2,7 @@ name: Build Plugins to MVF Binaries
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 permissions:
@@ -23,15 +23,19 @@ jobs:
 
       - name: Download Compiler & Dependencies
         run: |
-          curl -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
-          curl -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar
-          curl -sLo android.jar https://github.com/Sable/android-platforms/raw/master/android-33/android.jar
-          curl -sLo d8.jar https://repo1.maven.org/maven2/com/android/tools/d8/8.2.24/d8-8.2.24.jar
-          curl -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
+          curl -f -sLo jsoup.jar https://repo1.maven.org/maven2/org/jsoup/jsoup/1.17.2/jsoup-1.17.2.jar
+          curl -f -sLo coroutines.jar https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.8.0/kotlinx-coroutines-core-jvm-1.8.0.jar
+          curl -f -sLo kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v1.9.22/kotlin-compiler-1.9.22.zip
           unzip -qo kotlinc.zip
 
       - name: Build Plugins to MVF
         run: |
+          ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -name "android.jar" | sort -V | tail -n 1)
+          D8_TOOL=$(find "$ANDROID_HOME/build-tools" -name "d8" | sort -V | tail -n 1)
+
+          echo "Using ANDROID_JAR: $ANDROID_JAR"
+          echo "Using D8_TOOL: $D8_TOOL"
+
           mkdir -p src/com/moviefy/stream/ui/screens
           cat << 'EOF' > src/com/moviefy/stream/ui/screens/MainAPI.kt
           package com.moviefy.stream.ui.screens
@@ -78,8 +82,10 @@ jobs:
           EOF
 
           ./kotlinc/bin/kotlinc src/com/moviefy/stream/ui/screens/MainAPI.kt \
-            -cp "jsoup.jar:coroutines.jar:android.jar" \
+            -cp "jsoup.jar:coroutines.jar:$ANDROID_JAR" \
             -d "api_stub.jar"
+
+          KOTLIN_STDLIB="./kotlinc/lib/kotlin-stdlib.jar"
 
           shopt -s nullglob
           for file in plugins/*.kt *.kt; do
@@ -87,14 +93,16 @@ jobs:
               baseName=$(basename "$file" .kt)
               outputName=$(echo "$baseName" | sed 's/Provider$//')
 
+              echo "Compiling $file -> ${outputName}.mvf"
+
               ./kotlinc/bin/kotlinc "$file" \
-                -cp "api_stub.jar:jsoup.jar:coroutines.jar:android.jar" \
+                -cp "api_stub.jar:jsoup.jar:coroutines.jar:$ANDROID_JAR" \
                 -d "${outputName}_temp.jar"
 
               mkdir -p "dex_out_${outputName}"
-              java -cp d8.jar com.android.tools.r8.D8 \
-                --release --min-api 21 \
-                --lib android.jar \
+              "$D8_TOOL" --release --min-api 21 \
+                --lib "$ANDROID_JAR" \
+                --lib "$KOTLIN_STDLIB" \
                 --lib jsoup.jar \
                 --lib coroutines.jar \
                 --lib api_stub.jar \
@@ -103,12 +111,13 @@ jobs:
 
               if [ -f "dex_out_${outputName}/classes.dex" ]; then
                 mv "dex_out_${outputName}/classes.dex" "${outputName}.mvf"
+                echo "Successfully built ${outputName}.mvf"
               fi
               rm -rf "dex_out_${outputName}" "${outputName}_temp.jar"
             fi
           done
 
-          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar android.jar d8.jar api_stub.jar
+          rm -rf src kotlinc kotlinc.zip jsoup.jar coroutines.jar api_stub.jar
 
       - name: Commit and Push MVF Binaries
         run: |
