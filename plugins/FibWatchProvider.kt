@@ -6,18 +6,21 @@ import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.SeasonItem
 import com.moviefy.stream.ui.screens.StreamItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 class FibWatchProvider : MainAPI {
-    override var name = "FibWatch 1"
+    override var name = "FibWatch"
     override var mainUrl = "https://fibwatch.art"
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
 
-    private fun getBrowserDoc(targetUrl: String): Document {
-        return Jsoup.connect(targetUrl)
+    // IO থ্রেডে রান করার জন্য ফাংশন, যা মেইন থ্রেড ক্র্যাশ এড়াবে
+    private suspend fun getBrowserDoc(targetUrl: String): Document = withContext(Dispatchers.IO) {
+        Jsoup.connect(targetUrl)
             .userAgent(userAgent)
             .referrer("$mainUrl/")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -27,8 +30,8 @@ class FibWatchProvider : MainAPI {
             .get()
     }
 
-    private fun getBrowserJson(targetUrl: String): String {
-        return Jsoup.connect(targetUrl)
+    private suspend fun getBrowserJson(targetUrl: String): String = withContext(Dispatchers.IO) {
+        Jsoup.connect(targetUrl)
             .userAgent(userAgent)
             .referrer("$mainUrl/")
             .header("Accept", "application/json, text/javascript, */*; q=0.01")
@@ -53,7 +56,7 @@ class FibWatchProvider : MainAPI {
                 val imgElement = card.selectFirst("img")
                 val image = imgElement?.attr("src")?.trim() ?: ""
                 val title = card.selectFirst("p.hptag, h4")?.attr("title")?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown"
+                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown Title"
 
                 if (rawUrl.isNotEmpty()) {
                     val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$mainUrl$rawUrl"
@@ -86,7 +89,7 @@ class FibWatchProvider : MainAPI {
                 val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim() ?: continue
                 val image = card.selectFirst("img")?.attr("src")?.trim() ?: ""
                 val title = card.selectFirst("p.hptag, h4")?.attr("title")?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown"
+                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown Title"
 
                 if (rawUrl.isNotEmpty()) {
                     val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$mainUrl$rawUrl"
