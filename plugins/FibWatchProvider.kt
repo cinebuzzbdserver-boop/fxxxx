@@ -1,36 +1,26 @@
-package com.flixora.providers
+package com.moviefy.stream.providers
 
-import com.flixora.plugin.EpisodeItem
-import com.flixora.plugin.MainAPI
-import com.flixora.plugin.MediaStructure
-import com.flixora.plugin.MovieItem
-import com.flixora.plugin.SeasonItem
-import com.flixora.plugin.StreamItem
+import com.moviefy.stream.ui.screens.EpisodeItem
+import com.moviefy.stream.ui.screens.MainAPI
+import com.moviefy.stream.ui.screens.MediaStructure
+import com.moviefy.stream.ui.screens.MovieItem
+import com.moviefy.stream.ui.screens.SeasonItem
+import com.moviefy.stream.ui.screens.StreamItem
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
-class FibWatchProvider : MainAPI() {
+class FibWatchProvider : MainAPI {
     override var name = "FibWatch"
     override var mainUrl = "https://fibwatch.art"
 
-    private val proxyPrefix = "https://wandering-glitter-0f39.blmbd.workers.dev/"
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
 
     private fun getBrowserDoc(targetUrl: String): Document {
-        val fetchUrl = if (targetUrl.startsWith(proxyPrefix)) targetUrl else "$proxyPrefix$targetUrl"
-        
-        return Jsoup.connect(fetchUrl)
+        return Jsoup.connect(targetUrl)
             .userAgent(userAgent)
             .referrer("$mainUrl/")
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Sec-Ch-Ua", "\"Not/A)Brand\";v=\"8\", \"Chromium\";v=\"126\", \"Google Chrome\";v=\"126\"")
-            .header("Sec-Ch-Ua-Mobile", "?0")
-            .header("Sec-Ch-Ua-Platform", "\"Windows\"")
-            .header("Sec-Fetch-Dest", "document")
-            .header("Sec-Fetch-Mode", "navigate")
-            .header("Sec-Fetch-Site", "cross-site")
             .ignoreContentType(true)
             .ignoreHttpErrors(true)
             .timeout(20000)
@@ -38,9 +28,7 @@ class FibWatchProvider : MainAPI() {
     }
 
     private fun getBrowserJson(targetUrl: String): String {
-        val fetchUrl = if (targetUrl.startsWith(proxyPrefix)) targetUrl else "$proxyPrefix$targetUrl"
-        
-        return Jsoup.connect(fetchUrl)
+        return Jsoup.connect(targetUrl)
             .userAgent(userAgent)
             .referrer("$mainUrl/")
             .header("Accept", "application/json, text/javascript, */*; q=0.01")
@@ -53,53 +41,29 @@ class FibWatchProvider : MainAPI() {
             .trim()
     }
 
-    private fun wrapProxy(url: String): String {
-        val trimmed = url.trim()
-        return if (trimmed.isNotEmpty() && !trimmed.startsWith(proxyPrefix)) {
-            "$proxyPrefix$trimmed"
-        } else {
-            trimmed
-        }
-    }
-
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
-            val targetUrl = if (page <= 1) {
-                "$mainUrl/videos/latest"
-            } else {
-                "$mainUrl/videos/latest?page_id=$page"
-            }
-
+            val targetUrl = if (page <= 1) "$mainUrl/videos/latest" else "$mainUrl/videos/latest?page_id=$page"
             val doc = getBrowserDoc(targetUrl)
-            val cards = doc.select(".video-latest-list")
+            val cards = doc.select(".video-latest-list, .video-wrapper")
 
             for (card in cards) {
-                // লিঙ্ক সিলেকশন: প্রথমে থাম্ব লিঙ্ক, না পেলে ব্লার ডিটেইলসের লিঙ্ক
-                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim()
-                    ?: card.selectFirst(".center_abs a")?.attr("href")?.trim()
-                    ?: card.selectFirst("a[href*='/watch/']")?.attr("href")?.trim()
-                    ?: ""
-
-                // ইমেজ সিলেকশন
-                val imgElement = card.selectFirst(".video-thumb img")
+                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim() ?: continue
+                val imgElement = card.selectFirst("img")
                 val image = imgElement?.attr("src")?.trim() ?: ""
+                val title = card.selectFirst("p.hptag, h4")?.attr("title")?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown"
 
-                // টাইটেল সিলেকশন: হোমপেজের স্ট্রাকচার অনুযায়ী channel_details p.hptag অথবা img alt
-                val title = card.selectFirst(".channel_details p.hptag")?.attr("title")?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst(".channel_details p.hptag")?.text()?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst(".video-title p.hptag")?.text()?.trim()?.ifEmpty { null }
-                    ?: imgElement?.attr("alt")?.trim()
-                    ?: ""
-
-                if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
+                if (rawUrl.isNotEmpty()) {
                     val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$mainUrl$rawUrl"
                     list.add(
                         MovieItem(
                             title = title,
-                            image = wrapProxy(image),
+                            image = image,
                             url = fullUrl,
-                            imageSize = "16:9"
+                            isPoster = false,
+                            referer = "$mainUrl/"
                         )
                     )
                 }
@@ -108,48 +72,31 @@ class FibWatchProvider : MainAPI() {
             e.printStackTrace()
         }
         return list
-    }
-
-    override suspend fun search(query: String): List<MovieItem> {
-        return search(query, 1)
     }
 
     override suspend fun search(query: String, page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-            val targetUrl = if (page <= 1) {
-                "$mainUrl/search?keyword=$encodedQuery"
-            } else {
-                "$mainUrl/search?keyword=$encodedQuery&page_id=$page"
-            }
-
+            val targetUrl = if (page <= 1) "$mainUrl/search?keyword=$encodedQuery" else "$mainUrl/search?keyword=$encodedQuery&page_id=$page"
             val doc = getBrowserDoc(targetUrl)
-            val cards = doc.select(".video-latest-list")
+            val cards = doc.select(".video-latest-list, .video-wrapper")
 
             for (card in cards) {
-                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim()
-                    ?: card.selectFirst(".video-title a")?.attr("href")?.trim()
-                    ?: card.selectFirst("a[href*='/watch/']")?.attr("href")?.trim()
-                    ?: ""
+                val rawUrl = card.selectFirst(".video-thumb > a")?.attr("href")?.trim() ?: continue
+                val image = card.selectFirst("img")?.attr("src")?.trim() ?: ""
+                val title = card.selectFirst("p.hptag, h4")?.attr("title")?.trim()?.ifEmpty { null }
+                    ?: card.selectFirst("p.hptag, h4")?.text()?.trim() ?: "Unknown"
 
-                val imgElement = card.selectFirst(".video-thumb img")
-                val image = imgElement?.attr("src")?.trim() ?: ""
-
-                val title = card.selectFirst(".video-title p.hptag")?.text()?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst(".channel_details p.hptag")?.attr("title")?.trim()?.ifEmpty { null }
-                    ?: card.selectFirst(".channel_details p.hptag")?.text()?.trim()?.ifEmpty { null }
-                    ?: imgElement?.attr("alt")?.trim()
-                    ?: ""
-
-                if (title.isNotEmpty() && rawUrl.isNotEmpty()) {
+                if (rawUrl.isNotEmpty()) {
                     val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$mainUrl$rawUrl"
                     list.add(
                         MovieItem(
                             title = title,
-                            image = wrapProxy(image),
+                            image = image,
                             url = fullUrl,
-                            imageSize = "16:9"
+                            isPoster = false,
+                            referer = "$mainUrl/"
                         )
                     )
                 }
@@ -160,101 +107,80 @@ class FibWatchProvider : MainAPI() {
         return list
     }
 
-    override suspend fun loadLinks(postUrl: String): List<StreamItem> {
-        return emptyList()
-    }
-
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         try {
             val doc = getBrowserDoc(postUrl)
+            val videoId = doc.selectFirst("#see-more-res, [data-vid]")?.attr("data-vid")?.trim() ?: ""
+            val currentRes = doc.selectFirst(".available-res .res-btn.selected")?.text()?.trim() ?: "HD"
 
-            val videoId = doc.selectFirst("#see-more-res")?.attr("data-vid")?.trim()
-                ?: doc.selectFirst("[data-vid]")?.attr("data-vid")?.trim()
-                ?: ""
-
-            val currentRes = doc.selectFirst(".available-res .res-btn.selected")?.text()?.trim()?.ifEmpty { null } ?: "Default"
-
-            // ১. সিরিজ চেক ও পার্সিং
             if (videoId.isNotEmpty()) {
                 val epApiUrl = "$mainUrl/ajax/episodes.php?video_id=$videoId"
                 val epJson = getBrowserJson(epApiUrl)
 
-                val epRegex = Regex("""\{"display":"(.*?)","url":"(.*?)","is_current":(true|false)\}""")
-                val epMatches = epRegex.findAll(epJson).toList()
-
-                if (epMatches.isNotEmpty()) {
+                if (epJson.contains("\"is_current\"")) {
                     val seasonMap = mutableMapOf<String, MutableList<EpisodeItem>>()
-
-                    for (match in epMatches) {
+                    val epRegex = Regex("""\{"display":"(.*?)","url":"(.*?)","is_current":(true|false)\}""")
+                    
+                    for (match in epRegex.findAll(epJson)) {
                         val display = match.groupValues[1].replace("\\/", "/").trim()
                         val relUrl = match.groupValues[2].replace("\\/", "/").trim()
-
+                        
                         if (relUrl.isNotEmpty()) {
                             val epFullUrl = if (relUrl.startsWith("http")) relUrl else "$mainUrl$relUrl"
-
                             val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(display)
-                            val seasonName = if (seasonMatch != null) {
-                                "Season " + seasonMatch.groupValues[1].toInt()
-                            } else {
-                                "Season 1"
-                            }
-
+                            val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
+                            
                             val rawLinks = mutableListOf(Pair(currentRes, epFullUrl))
-                            val epList = seasonMap.getOrPut(seasonName) { mutableListOf() }
-                            epList.add(EpisodeItem(name = display, rawGenerateLinks = rawLinks))
+                            seasonMap.getOrPut(seasonName) { mutableListOf() }.add(EpisodeItem(name = display, rawGenerateLinks = rawLinks))
                         }
                     }
-
-                    val seasonsList = seasonMap.map { (sName, epList) -> SeasonItem(name = sName, episodes = epList) }
+                    val seasonsList = seasonMap.map { SeasonItem(name = it.key, episodes = it.value) }
                     if (seasonsList.isNotEmpty()) {
                         return MediaStructure(isSeries = true, rawMovieLinks = emptyList(), seasons = seasonsList)
                     }
                 }
             }
 
-            // ২. মুভি কোয়ালিটি লিংক পার্সিং
             val rawMovieLinks = mutableListOf<Pair<String, String>>()
             rawMovieLinks.add(Pair(currentRes, postUrl))
 
             if (videoId.isNotEmpty()) {
                 val resApiUrl = "$mainUrl/ajax/resolution_switcher.php?video_id=$videoId"
                 val resJson = getBrowserJson(resApiUrl)
-
-                val popupBlock = resJson.substringAfter("\"popup\":", "").substringBefore("]")
                 val resRegex = Regex("""\{"res":"(.*?)","url":"(.*?)","selected":(true|false)\}""")
-                val resMatches = resRegex.findAll(popupBlock)
-
-                for (match in resMatches) {
+                
+                for (match in resRegex.findAll(resJson)) {
                     val res = match.groupValues[1].trim()
                     val relUrl = match.groupValues[2].replace("\\/", "/").trim()
                     val isSelected = match.groupValues[3].toBoolean()
-
+                    
                     if (!isSelected && relUrl.isNotEmpty() && !res.equals("See More", ignoreCase = true)) {
                         val fullUrl = if (relUrl.startsWith("http")) relUrl else "$mainUrl$relUrl"
                         rawMovieLinks.add(Pair(res, fullUrl))
                     }
                 }
             }
-
             return MediaStructure(isSeries = false, rawMovieLinks = rawMovieLinks, seasons = emptyList())
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return MediaStructure(isSeries = false, rawMovieLinks = listOf(Pair("Default", postUrl)), seasons = emptyList())
+        return MediaStructure(isSeries = false, rawMovieLinks = listOf(Pair("HD", postUrl)), seasons = emptyList())
     }
 
-    override suspend fun resolveDirectLink(generateUrl: String): String? {
+    override suspend fun resolveDirectLink(generateUrl: String): StreamItem? {
         try {
             val doc = getBrowserDoc(generateUrl)
             val htmlContent = doc.html()
-
             val videoUrlRegex = Regex("""var\s+VIDEO_URL\s*=\s*["']([^"']+)["']""")
-            val match = videoUrlRegex.find(htmlContent)
-            val directStreamUrl = match?.groupValues?.get(1)?.trim() ?: ""
+            val directStreamUrl = videoUrlRegex.find(htmlContent)?.groupValues?.get(1)?.trim() ?: ""
 
             if (directStreamUrl.isNotEmpty()) {
                 val cleanedUrl = directStreamUrl.replace("\\/", "/")
-                return wrapProxy(cleanedUrl)
+                return StreamItem(
+                    quality = "HD",
+                    streamUrl = cleanedUrl,
+                    headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to userAgent)
+                )
             }
         } catch (e: Exception) {
             e.printStackTrace()
