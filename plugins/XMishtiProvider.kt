@@ -17,38 +17,69 @@ class XMishtiProvider : MainAPI {
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.8010.57 Mobile Safari/537.36"
 
-    private suspend fun getBrowserDoc(targetUrl: String): Document = withContext(Dispatchers.IO) {
-        Jsoup.connect(targetUrl)
+    // ব্রাউজারের সেশন কুকি ধরে রাখার জন্য
+    private var sessionCookies: MutableMap<String, String> = mutableMapOf()
+
+    private suspend fun getBrowserDoc(targetUrl: String, isAsync: Boolean = false): Document = withContext(Dispatchers.IO) {
+        val connection = Jsoup.connect(targetUrl)
             .userAgent(userAgent)
             .referrer("$mainUrl/")
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-            .header("X-Requested-With", "XMLHttpRequest")
+            .header("Accept", if (isAsync) "*/*" else "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
+            .header("sec-ch-ua", "\"Chromium\";v=\"153\", \"Not A(Brand\";v=\"24\", \"Google Chrome\";v=\"153\"")
+            .header("sec-ch-ua-mobile", "?1")
+            .header("sec-ch-ua-platform", "\"Android\"")
+            .header("Sec-Fetch-Dest", if (isAsync) "empty" else "document")
+            .header("Sec-Fetch-Mode", if (isAsync) "cors" else "navigate")
+            .header("Sec-Fetch-Site", "same-origin")
+            .cookies(sessionCookies)
             .ignoreContentType(true)
             .ignoreHttpErrors(true)
-            .timeout(20000)
-            .get()
+            .timeout(25000)
+
+        if (isAsync) {
+            connection.header("X-Requested-With", "XMLHttpRequest")
+        }
+
+        val response = connection.execute()
+        // নতুন কুকিজ আসলে আপডেট করে রাখা
+        sessionCookies.putAll(response.cookies())
+
+        val body = response.body()
+        if (isAsync) {
+            Jsoup.parseBodyFragment(body, mainUrl)
+        } else {
+            response.parse()
+        }
     }
 
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
         try {
+            // হোমপেজের async রিকোয়েস্ট লিংক
             val targetUrl = "$mainUrl/?mode=async&function=get_block&block_id=list_videos_most_recent_videos&sort_by=post_date&from=$page"
-            val doc = getBrowserDoc(targetUrl)
-            val items = doc.select(".thumb.item, .thumb_rel.item")
+            val doc = getBrowserDoc(targetUrl, isAsync = true)
+            
+            // সব thumb item সিলেক্ট করা
+            val items = doc.select(".thumb.item, .thumb_rel.item, .thumb")
 
             for (item in items) {
+                // বিজ্ঞাপন ও প্রমোশনাল ব্যানার ইগনোর করা
                 if (item.selectFirst("ins, .qualtiy:contains(AD), .title:contains(KamaReels)") != null) {
                     continue
                 }
 
-                val anchor = item.selectFirst("a") ?: continue
+                val anchor = item.selectFirst("a[href*='/video/'], a") ?: continue
                 val rawUrl = anchor.attr("href").trim()
-                if (rawUrl.isEmpty()) continue
+                if (rawUrl.isEmpty() || rawUrl == "#") continue
 
                 val imgElement = item.selectFirst("img")
                 var image = imgElement?.attr("data-webp")?.trim().orEmpty()
                 if (image.isEmpty()) {
                     image = imgElement?.attr("src")?.trim().orEmpty()
+                }
+                if (image.startsWith("//")) {
+                    image = "https:$image"
                 }
 
                 val title = item.selectFirst(".title")?.text()?.trim()
@@ -63,7 +94,7 @@ class XMishtiProvider : MainAPI {
                         title = title,
                         image = image,
                         url = fullUrl,
-                        isPoster = false,
+                        isPoster = false, // ব্যানার থাম্বনেইল
                         referer = "$mainUrl/"
                     )
                 )
@@ -78,24 +109,28 @@ class XMishtiProvider : MainAPI {
         val list = mutableListOf<MovieItem>()
         try {
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+            // সার্চের async লিংক
             val targetUrl = "$mainUrl/search/$encodedQuery/?mode=async&function=get_block&block_id=list_videos_videos_list_search_result&q=$encodedQuery&category_ids=&sort_by=&from_videos=$page"
             
-            val doc = getBrowserDoc(targetUrl)
-            val items = doc.select(".thumb.item, .thumb_rel.item")
+            val doc = getBrowserDoc(targetUrl, isAsync = true)
+            val items = doc.select(".thumb.item, .thumb_rel.item, .thumb")
 
             for (item in items) {
                 if (item.selectFirst("ins, .qualtiy:contains(AD), .title:contains(KamaReels)") != null) {
                     continue
                 }
 
-                val anchor = item.selectFirst("a") ?: continue
+                val anchor = item.selectFirst("a[href*='/video/'], a") ?: continue
                 val rawUrl = anchor.attr("href").trim()
-                if (rawUrl.isEmpty()) continue
+                if (rawUrl.isEmpty() || rawUrl == "#") continue
 
                 val imgElement = item.selectFirst("img")
                 var image = imgElement?.attr("data-webp")?.trim().orEmpty()
                 if (image.isEmpty()) {
                     image = imgElement?.attr("src")?.trim().orEmpty()
+                }
+                if (image.startsWith("//")) {
+                    image = "https:$image"
                 }
 
                 val title = item.selectFirst(".title")?.text()?.trim()
@@ -124,7 +159,7 @@ class XMishtiProvider : MainAPI {
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
         val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
-            rawMovieLinks.add(Pair("Direct Stream", postUrl))
+            rawMovieLinks.add(Pair("Direct Video", postUrl))
             return MediaStructure(
                 isSeries = false,
                 rawMovieLinks = rawMovieLinks,
@@ -133,17 +168,19 @@ class XMishtiProvider : MainAPI {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return MediaStructure(isSeries = false, rawMovieLinks = listOf(Pair("Direct Stream", postUrl)), seasons = emptyList())
+        return MediaStructure(isSeries = false, rawMovieLinks = listOf(Pair("Direct Video", postUrl)), seasons = emptyList())
     }
 
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? {
         try {
-            val doc = getBrowserDoc(generateUrl)
+            val doc = getBrowserDoc(generateUrl, isAsync = false)
             val html = doc.html()
 
             var directStreamUrl = ""
 
-            val pathRegex = Regex("""get_file/\d+/[a-f0-9]+/(\d+/\d+/\d+\.mp4)""")
+            // ১. event_reporting2 অথবা get_file পাথ থেকে \d+/\d+/\d+\.mp4 ক্যাপচার করা
+            // উদাহরণ: 4000/4053/4053.mp4
+            val pathRegex = Regex("""(?:get_file/\d+/[a-f0-9]+/|get_file/[^/]+/[^/]+/)?(\d+/\d+/\d+\.mp4)""")
             val match = pathRegex.find(html)
 
             if (match != null) {
@@ -151,19 +188,19 @@ class XMishtiProvider : MainAPI {
                 directStreamUrl = "$cdnUrl/$relativePath"
             }
 
+            // ২. ব্যাকআপ চেক: HTML-এ ডিরেক্ট cdn লিঙ্ক বা video source ট্যাগ
             if (directStreamUrl.isEmpty()) {
-                val fullUrlRegex = Regex("""event_reporting2:\s*['"](https?://[^'"]+?/get_file/\d+/[a-f0-9]+/(\d+/\d+/\d+\.mp4)[^'"]*?)['"]""")
-                val fullMatch = fullUrlRegex.find(html)
-                if (fullMatch != null) {
-                    val relativePath = fullMatch.groupValues[2]
-                    directStreamUrl = "$cdnUrl/$relativePath"
+                val cdnRegex = Regex("""https?://cdn\.xmishti\.com/[^\s"'<>]+\.mp4""")
+                val cdnMatch = cdnRegex.find(html)
+                if (cdnMatch != null) {
+                    directStreamUrl = cdnMatch.value
                 }
             }
 
             if (directStreamUrl.isEmpty()) {
-                val directVideoSrc = doc.selectFirst("video source, video")?.attr("src")?.trim().orEmpty()
-                if (directVideoSrc.isNotEmpty()) {
-                    directStreamUrl = if (directVideoSrc.startsWith("http")) directVideoSrc else "$mainUrl$directVideoSrc"
+                val videoSrc = doc.selectFirst("video source, video")?.attr("src")?.trim().orEmpty()
+                if (videoSrc.isNotEmpty()) {
+                    directStreamUrl = if (videoSrc.startsWith("http")) videoSrc else "$mainUrl$videoSrc"
                 }
             }
 
