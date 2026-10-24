@@ -1,5 +1,6 @@
 package com.moviefy.stream.providers
 
+import android.util.Base64
 import com.moviefy.stream.ui.screens.MainAPI
 import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
@@ -27,6 +28,28 @@ class MovieLinkBDProvider : MainAPI {
             .ignoreHttpErrors(true)
             .timeout(25000)
             .get()
+    }
+
+    private fun decryptMlbdData(b64Str: String, seedHex: String, rounds: Int): String {
+        return try {
+            var x = seedHex.toLong(16) and 0xFFFFFFFFL
+            for (i in 0 until rounds) {
+                x = (x * 1103515245L + 12345L) and 0xFFFFFFFFL
+            }
+
+            val rawBytes = Base64.decode(b64Str.trim(), Base64.DEFAULT)
+            val out = StringBuilder()
+
+            for (byte in rawBytes) {
+                x = (x * 1103515245L + 12345L) and 0xFFFFFFFFL
+                val keyByte = ((x shr 16) and 0xFFL).toInt()
+                val decByte = (byte.toInt() and 0xFF) xor keyByte
+                out.append(decByte.toChar())
+            }
+            out.toString()
+        } catch (e: Exception) {
+            ""
+        }
     }
 
     override suspend fun getMainPage(page: Int): List<MovieItem> {
@@ -121,8 +144,29 @@ class MovieLinkBDProvider : MainAPI {
         val rawMovieLinks = mutableListOf<Pair<String, String>>()
         try {
             val doc = getBrowserDoc(postUrl)
-            val dlButtons = doc.select("a[data-dl], .mlbd-download-button-wrap a")
 
+            val playerScript = doc.selectFirst("script#mlbdInlinePlayerData")
+            if (playerScript != null) {
+                val pSeed = playerScript.attr("data-s").trim()
+                val pRounds = playerScript.attr("data-r").trim().toIntOrNull() ?: 600
+                val pPayload = playerScript.data().trim()
+
+                if (pPayload.isNotEmpty() && pSeed.isNotEmpty()) {
+                    val decryptedPlayer = decryptMlbdData(pPayload, pSeed, pRounds)
+                    val streamUrls = Regex("""https?://[^\s"'<>]+""").findAll(decryptedPlayer).map { it.value.trim() }.toList()
+
+                    streamUrls.distinct().forEachIndexed { index, streamLink ->
+                        val label = when {
+                            streamLink.contains("m3u8") -> "Fast Stream (HLS)"
+                            index == 0 -> "Direct Player"
+                            else -> "Server ${index + 1}"
+                        }
+                        rawMovieLinks.add(Pair(label, streamLink))
+                    }
+                }
+            }
+
+            val dlButtons = doc.select("a[data-dl], .mlbd-download-button-wrap a")
             for (btn in dlButtons) {
                 val btnText = btn.selectFirst(".btn-text")?.text()?.trim() ?: btn.text().trim()
                 val label = Regex("""\[(.*?)\]""").find(btnText)?.groupValues?.get(1)
@@ -130,17 +174,19 @@ class MovieLinkBDProvider : MainAPI {
 
                 val token = btn.attr("data-dl").trim()
                 val ds = btn.attr("data-ds").trim()
+                val dr = btn.attr("data-dr").trim().toIntOrNull() ?: 300
                 val rawHref = btn.attr("href").trim()
 
-                // স্টেপ ১: ডাউনলোড টোকেন বা ইউআরএল নির্ধারণ
-                val targetUrl = when {
-                    token.isNotEmpty() -> {
-                        "$mainUrl/dl?data=${URLEncoder.encode(token, "UTF-8")}&ds=$ds"
+                var targetUrl = ""
+                if (token.isNotEmpty() && ds.isNotEmpty()) {
+                    val decodedPath = decryptMlbdData(token, ds, dr)
+                    if (decodedPath.isNotEmpty()) {
+                        targetUrl = if (decodedPath.startsWith("http")) decodedPath else "$mainUrl$decodedPath"
                     }
-                    rawHref.isNotEmpty() && rawHref != "#" -> {
-                        if (rawHref.startsWith("http")) rawHref else "$mainUrl$rawHref"
-                    }
-                    else -> ""
+                }
+
+                if (targetUrl.isEmpty() && rawHref.isNotEmpty() && rawHref != "#") {
+                    targetUrl = if (rawHref.startsWith("http")) rawHref else "$mainUrl$rawHref"
                 }
 
                 if (targetUrl.isNotEmpty()) {
@@ -165,10 +211,19 @@ class MovieLinkBDProvider : MainAPI {
 
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? {
         try {
-            // স্টেপ ১: টোকেন বা ডাউনলোড হাব পেজে রিকোয়েস্ট পাঠানো
+            if (generateUrl.contains(".r2.dev") || 
+                generateUrl.contains(".cloudflarestorage.com") || 
+                generateUrl.contains(".mp4") || 
+                generateUrl.contains(".m3u8")) {
+                return StreamItem(
+                    quality = "HD",
+                    streamUrl = generateUrl,
+                    headers = mapOf("Referer" to "$mainUrl/", "User-Agent" to userAgent)
+                )
+            }
+
             val hubDoc = getBrowserDoc(generateUrl, refererUrl = "$mainUrl/")
 
-            // স্টেপ ২: One Click Download লিঙ্ক বের করা
             var oneClickUrl = ""
             val oneClickBtn = hubDoc.selectFirst("a.dlh-arow[data-host='oneclick'], a[href*='/file/'], a[data-btn='One Click Download']")
             if (oneClickBtn != null) {
@@ -176,23 +231,19 @@ class MovieLinkBDProvider : MainAPI {
                 oneClickUrl = if (href.startsWith("http")) href else "$mainUrl$href"
             }
 
-            // যদি হাব পেজে বাটন না থাকে, সরাসরি generateUrl কেই ফাইনাল পেজ ধরে চেষ্টা করা
             val fileDoc = if (oneClickUrl.isNotEmpty()) {
                 getBrowserDoc(oneClickUrl, refererUrl = generateUrl)
             } else {
                 hubDoc
             }
 
-            // স্টেপ ৩: ফাইনাল পেজ থেকে ULTRA SPEED বা FAST CLOUD লিঙ্ক এক্সট্র্যাক্ট করা
             var directStreamUrl = ""
 
-            // ৩.১: Ultra Speed লিঙ্ক খোঁজা
             val ultraBtn = fileDoc.selectFirst("a.btn-ultra[data-host='ultra'], a[data-btn*='ULTRA']")
             if (ultraBtn != null && ultraBtn.attr("href").trim().startsWith("http")) {
                 directStreamUrl = ultraBtn.attr("href").trim()
             }
 
-            // ৩.২: Fast Cloud লিঙ্ক খোঁজা (Ultra না থাকলে)
             if (directStreamUrl.isEmpty()) {
                 val cloudBtn = fileDoc.selectFirst("a.btn-cloud[data-host='instant'], a[data-btn*='Fast Cloud']")
                 if (cloudBtn != null && cloudBtn.attr("href").trim().startsWith("http")) {
@@ -200,7 +251,6 @@ class MovieLinkBDProvider : MainAPI {
                 }
             }
 
-            // ৩.৩: data-mlbd-click-ad অথবা যেকোনো R2 ডিরেক্ট স্টোরেজ লিঙ্ক
             if (directStreamUrl.isEmpty()) {
                 val anyFinalBtn = fileDoc.selectFirst("a[data-mlbd-click-ad='file-final-download']")
                 if (anyFinalBtn != null && anyFinalBtn.attr("href").trim().startsWith("http")) {
@@ -208,7 +258,6 @@ class MovieLinkBDProvider : MainAPI {
                 }
             }
 
-            // ৩.৪: ব্যাকআপ রেজেক্স (Cloudflare R2 / Cloud Storage)
             if (directStreamUrl.isEmpty()) {
                 val r2Regex = Regex("""https?://[^\s"'<>]+\.(?:r2\.dev|cloudflarestorage\.com)[^\s"'<>]*""")
                 directStreamUrl = r2Regex.find(fileDoc.html())?.value?.trim().orEmpty()
