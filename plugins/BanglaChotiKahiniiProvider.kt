@@ -24,7 +24,6 @@ class BanglaChotiKahiniiProvider : MainAPI {
         .followSslRedirects(true)
         .build()
 
-    // JSON কনফিগে www বা /videos ছাড়া লিংক থাকলেও যেন সঠিক বেস ইউআরএল তৈরি হয়
     private fun getBaseUrl(): String {
         var clean = mainUrl.trim().trimEnd('/')
         if (clean.contains("://banglachotikahinii.com")) {
@@ -39,7 +38,6 @@ class BanglaChotiKahiniiProvider : MainAPI {
         return clean
     }
 
-    // হুবহু তোমার curl -s -H 'user-agent: ...' এর মতো কাজ করবে
     private suspend fun fetchHtml(url: String): String = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
@@ -56,41 +54,52 @@ class BanglaChotiKahiniiProvider : MainAPI {
         }
     }
 
-    // হুবহু তোমার grep কমান্ডের মতো Link, Title এবং Image বের করার ফাংশন
+    // তোমার টার্মিনালের সফল কার্ল ও গ্রিপ লজিক অনুযায়ী নিখুঁত পার্সিং
     private fun parseItemsFromRawHtml(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
-        val rootDomain = "https://www.banglachotikahinii.com"
 
-        // তোমার grep প্যাটার্ন: <a href="(.../video/...)" title="(...)" ... <img ... src="(....jpg)"
-        val itemRegex = Regex(
-            """<a\s+href="([^"]+/video/[^"]+)"\s+title="([^"]+)"[\s\S]*?<img[^>]+src="([^"]+\.jpg)"""",
-            RegexOption.IGNORE_CASE
-        )
+        // থাম্ব ব্লক বা প্রতিটি আইটেম আলাদা করে নেওয়া
+        val itemBlocks = html.split(Regex("""<div[^>]*class="[^"]*thumb[^"]*"[^>]*>""", RegexOption.IGNORE_CASE))
 
-        for (match in itemRegex.findAll(html)) {
-            val rawUrl = match.groupValues[1].trim()
-            val rawTitle = match.groupValues[2].trim()
-                .replace("&#039;", "'")
-                .replace("&quot;", "\"")
-                .replace("&amp;", "&")
-            val rawImg = match.groupValues[3].trim()
+        for (block in itemBlocks) {
+            val hrefMatch = Regex("""href="(https?://[^"]+/videos/[^"]+|/[^"]+/videos/[^"]+)"""", RegexOption.IGNORE_CASE).find(block)
+            val titleMatch = Regex("""title="([^"]+)"(?:\s+data-rt|[^>]*data-rt)""", RegexOption.IGNORE_CASE).find(block) 
+                ?: Regex("""title="([^"]+)"""", RegexOption.IGNORE_CASE).find(block)
+            val imgMatch = Regex("""src="(https?://[^"]+/contents/[^"]+\.jpg|/[^"]+/contents/[^"]+\.jpg)"|data-webp="(https?://[^"]+\.jpg|/[^"]+\.jpg)"""", RegexOption.IGNORE_CASE).find(block)
 
-            val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$rootDomain$rawUrl"
-            val fullImg = when {
-                rawImg.startsWith("http") -> rawImg
-                rawImg.startsWith("//") -> "https:$rawImg"
-                else -> "$rootDomain$rawImg"
-            }
+            if (hrefMatch != null && titleMatch != null) {
+                var rawUrl = hrefMatch.groupValues[1].trim()
+                val rawTitle = titleMatch.groupValues[1].trim()
+                    .replace("&#039;", "'")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
 
-            list.add(
-                MovieItem(
-                    title = rawTitle,
-                    image = fullImg,
-                    url = fullUrl,
-                    isPoster = false,
-                    referer = "$base/"
+                var rawImg = ""
+                if (imgMatch != null) {
+                    rawImg = (imgMatch.groupValues[1].ifEmpty { imgMatch.groupValues[2] }).trim()
+                }
+
+                if (rawUrl.isEmpty() || rawTitle.isEmpty()) continue
+
+                val rootDomain = "https://www.banglachotikahinii.com"
+                val fullUrl = if (rawUrl.startsWith("http")) rawUrl else "$rootDomain$rawUrl"
+                val fullImg = when {
+                    rawImg.startsWith("http") -> rawImg
+                    rawImg.startsWith("//") -> "https:$rawImg"
+                    rawImg.startsWith("/") -> "$rootDomain$rawImg"
+                    else -> "$rootDomain/$rawImg"
+                }
+
+                list.add(
+                    MovieItem(
+                        title = rawTitle,
+                        image = fullImg,
+                        url = fullUrl,
+                        isPoster = false,
+                        referer = "$base/"
+                    )
                 )
-            )
+            }
         }
         return list.distinctBy { it.url }
     }
@@ -123,7 +132,6 @@ class BanglaChotiKahiniiProvider : MainAPI {
         val html = fetchHtml(generateUrl)
         if (html.isEmpty()) return null
 
-        // তোমার নির্দেশনা অনুযায়ী: 2000/2638/2638.mp4 পাথ বের করে https://cdn.banglachotikahinii.com/ বসানো
         val pathRegex = Regex("""get_file/\d+/[a-zA-Z0-9]+/(\d+/\d+/\d+\.mp4)""")
         val match = pathRegex.find(html) ?: Regex("""/(\d+/\d+/\d+\.mp4)""").find(html)
 
