@@ -77,40 +77,36 @@ class HDWebMoviesProvider : MainAPI {
         }
     }
 
-    // স্লাইডার সম্পূর্ণ ইগনোর করে শুধুমাত্র মূল <div class="items full"> সেকশন থেকে রিসেন্টলি এডেড আইটেম পার্স করা
+    // স্লাইডার (<div class="image">) এবং Featured সেকশন সম্পূর্ণ বাদ দিয়ে শুধুমাত্র রিসেন্টলি অ্যাডেড (<div class="poster">) পোস্টারগুলো কালেক্ট করা হচ্ছে
     private fun parseMainPageItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
-        // মূল কন্টেন্ট সেকশন isolating করার জন্য <div class="items full"> খোঁজা হচ্ছে
-        val fullSectionRegex = Regex("""<div\s+class="items\s+full"[^>]*>([\s\S]*?)</div>\s*</div>\s*<div\s+class="sidebar""", RegexOption.IGNORE_CASE)
-        val sectionMatch = fullSectionRegex.find(html)
-        val sectionHtml = sectionMatch?.groupValues?.get(1) ?: html
+        // যদি পেজে <div class="items full"> থাকে তবে শুধু তার পরবর্তী অংশ নেওয়া হবে
+        val recentContainerStart = html.indexOf("""<div class="items full">""", ignoreCase = true)
+        val targetHtml = if (recentContainerStart != -1) {
+            val sub = html.substring(recentContainerStart)
+            val sidebarStart = sub.indexOf("""<div class="sidebar""", ignoreCase = true)
+            if (sidebarStart != -1) sub.substring(0, sidebarStart) else sub
+        } else {
+            html
+        }
 
-        val articleRegex = Regex(
-            """<article[^>]*class="[^"]*item[^"]*"[^>]*>([\s\S]*?)</article>""",
+        // শুধুমাত্র যেসব article-এর ভেতরে <div class="poster"> আছে সেগুলোই ম্যাচ করবে (স্লাইডারে <div class="image"> থাকে তাই স্লাইডার ১০০% বাদ পড়বে)
+        val posterArticleRegex = Regex(
+            """<article\s+id="([^"]+)"\s+class="item\s+movies"[^>]*>\s*<div\s+class="poster">\s*<img\s+src="([^"]+)"[^>]*>[\s\S]*?<div\s+class="data">\s*<h3>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>""",
             RegexOption.IGNORE_CASE
         )
-        val imgRegex = Regex("""<img[^>]+src="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
-        val titleLinkRegex = Regex("""<h3>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>""", RegexOption.IGNORE_CASE)
-        val fallbackLinkRegex = Regex("""<a\s+href="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
-        val altRegex = Regex("""alt="([^"]+)"""", RegexOption.IGNORE_CASE)
 
-        for (match in articleRegex.findAll(sectionHtml)) {
-            val block = match.groupValues[1]
+        for (match in posterArticleRegex.findAll(targetHtml)) {
+            val articleId = match.groupValues[1].trim()
+            // Featured titles সেকশনের ডুপ্লিকেট আইটেম বাদ দেওয়া হচ্ছে
+            if (articleId.contains("featured", ignoreCase = true)) continue
 
-            val rawImg = imgRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
-            if (rawImg.isEmpty()) continue
+            val rawImg = match.groupValues[2].trim()
+            val rawUrl = match.groupValues[3].trim()
+            val rawTitle = match.groupValues[4].replace(Regex("<[^>]*>"), "").trim()
 
-            val titleLinkMatch = titleLinkRegex.find(block)
-            val rawUrl = titleLinkMatch?.groupValues?.get(1)?.trim()
-                ?: fallbackLinkRegex.find(block)?.groupValues?.get(1)?.trim()
-                .orEmpty()
-
-            val rawTitle = titleLinkMatch?.groupValues?.get(2)?.replace(Regex("<[^>]*>"), "")?.trim()
-                ?: altRegex.find(block)?.groupValues?.get(1)?.trim()
-                .orEmpty()
-
-            if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
+            if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty() && rawImg.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
                 val fullImg = fixUrl(rawImg, base)
 
@@ -128,6 +124,7 @@ class HDWebMoviesProvider : MainAPI {
         return list.distinctBy { it.url }
     }
 
+    // সার্চ পেজের (<div class="result-item">) আইটেম পার্স করার ফাংশন
     private fun parseSearchItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
