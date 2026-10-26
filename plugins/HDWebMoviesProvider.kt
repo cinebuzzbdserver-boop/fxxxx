@@ -62,11 +62,18 @@ class HDWebMoviesProvider : MainAPI {
 
     private fun fixUrl(url: String, base: String): String {
         val trimmed = url.trim()
-        return when {
+        val resolved = when {
             trimmed.startsWith("http") -> trimmed
             trimmed.startsWith("//") -> "https:$trimmed"
             trimmed.startsWith("/") -> "$base$trimmed"
             else -> "$base/$trimmed"
+        }
+
+        // শুধুমাত্র image.tmdb.org এর ক্ষেত্রে কোয়ালিটি বাড়িয়ে original করে দেওয়া হচ্ছে
+        return if (resolved.contains("image.tmdb.org/t/p/")) {
+            resolved.replace(Regex("/t/p/[a-zA-Z0-9]+(?:_[a-zA-Z0-9]+)?/"), "/t/p/original/")
+        } else {
+            resolved
         }
     }
 
@@ -98,14 +105,14 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                val fullImg = fixUrl(rawImg, base).replace("/w185/", "/w342/")
+                val fullImg = fixUrl(rawImg, base)
 
                 list.add(
                     MovieItem(
                         title = decodeHtmlEntities(rawTitle),
                         image = fullImg,
                         url = fullUrl,
-                        isPoster = false,
+                        isPoster = true,
                         referer = "$base/"
                     )
                 )
@@ -142,14 +149,14 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                val fullImg = fixUrl(rawImg, base).replace("/w92/", "/w342/")
+                val fullImg = fixUrl(rawImg, base)
 
                 list.add(
                     MovieItem(
                         title = decodeHtmlEntities(rawTitle),
                         image = fullImg,
                         url = fullUrl,
-                        isPoster = false,
+                        isPoster = true,
                         referer = "$base/"
                     )
                 )
