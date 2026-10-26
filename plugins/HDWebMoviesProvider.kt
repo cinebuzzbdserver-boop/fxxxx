@@ -69,6 +69,7 @@ class HDWebMoviesProvider : MainAPI {
             else -> "$base/$trimmed"
         }
 
+        // শুধুমাত্র image.tmdb.org এর ক্ষেত্রে কোয়ালিটি বাড়িয়ে original করে দেওয়া হচ্ছে
         return if (resolved.contains("image.tmdb.org/t/p/")) {
             resolved.replace(Regex("/t/p/[a-zA-Z0-9]+(?:_[a-zA-Z0-9]+)?/"), "/t/p/original/")
         } else {
@@ -76,11 +77,11 @@ class HDWebMoviesProvider : MainAPI {
         }
     }
 
-    // শুধুমাত্র মূল সেকশন (<div class="items full">) থেকে রিসেন্টলি এডেড আইটেমগুলো পার্স করার ফাংশন (স্লাইডার ইগনোর করা হবে)
+    // স্লাইডার সম্পূর্ণ ইগনোর করে শুধুমাত্র মূল <div class="items full"> সেকশন থেকে রিসেন্টলি এডেড আইটেম পার্স করা
     private fun parseMainPageItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
-        // প্রথমে মূল কন্টেন্ট কন্টেইনার <div class="items full"> isolating করা হচ্ছে
+        // মূল কন্টেন্ট সেকশন isolating করার জন্য <div class="items full"> খোঁজা হচ্ছে
         val fullSectionRegex = Regex("""<div\s+class="items\s+full"[^>]*>([\s\S]*?)</div>\s*</div>\s*<div\s+class="sidebar""", RegexOption.IGNORE_CASE)
         val sectionMatch = fullSectionRegex.find(html)
         val sectionHtml = sectionMatch?.groupValues?.get(1) ?: html
