@@ -62,6 +62,7 @@ class HDWebMoviesProvider : MainAPI {
 
     private fun fixUrl(url: String, base: String): String {
         val trimmed = url.trim()
+        if (trimmed.isEmpty()) return ""
         val resolved = when {
             trimmed.startsWith("http") -> trimmed
             trimmed.startsWith("//") -> "https:$trimmed"
@@ -77,38 +78,60 @@ class HDWebMoviesProvider : MainAPI {
         }
     }
 
-    // স্লাইডার (<div class="image">) এবং Featured সেকশন সম্পূর্ণ বাদ দিয়ে শুধুমাত্র রিসেন্টলি অ্যাডেড (<div class="poster">) পোস্টারগুলো কালেক্ট করা হচ্ছে
+    private fun extractImageFromBlock(block: String, base: String): String {
+        val posterDivRegex = Regex("""<div[^>]*class="[^"]*poster[^"]*"[^>]*>([\s\S]*?)</div>""", RegexOption.IGNORE_CASE)
+        val targetArea = posterDivRegex.find(block)?.groupValues?.get(1) ?: block
+
+        val dataSrcMatch = Regex("""<img[^>]+data-src="([^"]+)"""", RegexOption.IGNORE_CASE).find(targetArea)
+        val srcMatch = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE).find(targetArea)
+
+        val rawImg = dataSrcMatch?.groupValues?.get(1)?.takeIf { !it.startsWith("data:image") }
+            ?: srcMatch?.groupValues?.get(1)?.takeIf { !it.startsWith("data:image") }
+            ?: ""
+
+        return fixUrl(rawImg, base)
+    }
+
+    // স্লাইডার ও Featured বাদ দিয়ে ১ নম্বর আইটেম থেকে শুরু করে সব রিসেন্টলি অ্যাডেড পোস্টার পার্স করার ফাংশন
     private fun parseMainPageItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
-        // যদি পেজে <div class="items full"> থাকে তবে শুধু তার পরবর্তী অংশ নেওয়া হবে
-        val recentContainerStart = html.indexOf("""<div class="items full">""", ignoreCase = true)
-        val targetHtml = if (recentContainerStart != -1) {
-            val sub = html.substring(recentContainerStart)
-            val sidebarStart = sub.indexOf("""<div class="sidebar""", ignoreCase = true)
-            if (sidebarStart != -1) sub.substring(0, sidebarStart) else sub
-        } else {
-            html
-        }
+        // সাইডবার (Recent Update widget) বাদ দেওয়া হচ্ছে যেন নিচের ছোট থাম্বনেইল না আসে
+        val sidebarIndex = html.indexOf("""<div class="sidebar""", ignoreCase = true)
+        val cleanHtml = if (sidebarIndex != -1) html.substring(0, sidebarIndex) else html
 
-        // শুধুমাত্র যেসব article-এর ভেতরে <div class="poster"> আছে সেগুলোই ম্যাচ করবে (স্লাইডারে <div class="image"> থাকে তাই স্লাইডার ১০০% বাদ পড়বে)
-        val posterArticleRegex = Regex(
-            """<article\s+id="([^"]+)"\s+class="item\s+movies"[^>]*>\s*<div\s+class="poster">\s*<img\s+src="([^"]+)"[^>]*>[\s\S]*?<div\s+class="data">\s*<h3>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>""",
-            RegexOption.IGNORE_CASE
-        )
+        // প্রতিটি <article ...> ব্লক আলাদাভাবে চেক করা হচ্ছে
+        val articleRegex = Regex("""<article([^>]*)>([\s\S]*?)</article>""", RegexOption.IGNORE_CASE)
+        val h3LinkRegex = Regex("""<h3[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>""", RegexOption.IGNORE_CASE)
+        val anyLinkRegex = Regex("""<a[^>]+href="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
+        val altRegex = Regex("""alt="([^"]+)"""", RegexOption.IGNORE_CASE)
 
-        for (match in posterArticleRegex.findAll(targetHtml)) {
-            val articleId = match.groupValues[1].trim()
-            // Featured titles সেকশনের ডুপ্লিকেট আইটেম বাদ দেওয়া হচ্ছে
-            if (articleId.contains("featured", ignoreCase = true)) continue
+        for (match in articleRegex.findAll(cleanHtml)) {
+            val attrs = match.groupValues[1]
+            val block = match.groupValues[2]
 
-            val rawImg = match.groupValues[2].trim()
-            val rawUrl = match.groupValues[3].trim()
-            val rawTitle = match.groupValues[4].replace(Regex("<[^>]*>"), "").trim()
+            // ১. যদি এটি Featured সেকশনের আইটেম হয় (post-featured- किंवा class="featu"), তবে স্কিপ করবে
+            if (attrs.contains("post-featured", ignoreCase = true)) continue
+            if (block.contains("""class="featu"""", ignoreCase = true)) continue
+            if (block.contains("""class="data dfeatur"""", ignoreCase = true)) continue
 
-            if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty() && rawImg.isNotEmpty()) {
+            // ২. স্লাইডারের আইটেমে <div class="image"> থাকে আর আসল রিসেন্ট মুভিতে <div class="poster"> থাকে
+            if (!block.contains("""class="poster"""", ignoreCase = true)) continue
+
+            val fullImg = extractImageFromBlock(block, base)
+            if (fullImg.isEmpty()) continue
+
+            val h3Match = h3LinkRegex.find(block)
+            val rawUrl = h3Match?.groupValues?.get(1)?.trim()
+                ?: anyLinkRegex.find(block)?.groupValues?.get(1)?.trim()
+                .orEmpty()
+
+            val rawTitle = h3Match?.groupValues?.get(2)?.replace(Regex("<[^>]*>"), "")?.trim()
+                ?: altRegex.find(block)?.groupValues?.get(1)?.trim()
+                .orEmpty()
+
+            if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                val fullImg = fixUrl(rawImg, base)
 
                 list.add(
                     MovieItem(
@@ -116,7 +139,7 @@ class HDWebMoviesProvider : MainAPI {
                         image = fullImg,
                         url = fullUrl,
                         isPoster = true,
-                        referer = "$base/"
+                        referer = null
                     )
                 )
             }
@@ -132,15 +155,14 @@ class HDWebMoviesProvider : MainAPI {
             """<div\s+class="result-item"[^>]*>[\s\S]*?<article[^>]*>([\s\S]*?)</article>""",
             RegexOption.IGNORE_CASE
         )
-        val imgRegex = Regex("""<img[^>]+src="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
-        val titleLinkRegex = Regex("""<div\s+class="title"[^>]*>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-        val fallbackLinkRegex = Regex("""<a\s+href="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
+        val titleLinkRegex = Regex("""<div\s+class="title"[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+        val fallbackLinkRegex = Regex("""<a[^>]+href="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
         val altRegex = Regex("""alt="([^"]+)"""", RegexOption.IGNORE_CASE)
 
         for (match in resultBlockRegex.findAll(html)) {
             val block = match.groupValues[1]
 
-            val rawImg = imgRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
+            val fullImg = extractImageFromBlock(block, base)
             val titleMatch = titleLinkRegex.find(block)
 
             val rawUrl = titleMatch?.groupValues?.get(1)?.trim()
@@ -153,7 +175,6 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                val fullImg = fixUrl(rawImg, base)
 
                 list.add(
                     MovieItem(
@@ -161,7 +182,7 @@ class HDWebMoviesProvider : MainAPI {
                         image = fullImg,
                         url = fullUrl,
                         isPoster = true,
-                        referer = "$base/"
+                        referer = null
                     )
                 )
             }
@@ -175,13 +196,23 @@ class HDWebMoviesProvider : MainAPI {
 
     override suspend fun getMainPage(page: Int): List<MovieItem> {
         val base = getBaseUrl()
-        val targetUrl = if (page <= 1) {
-            "$base/movies/"
+        val result = mutableListOf<MovieItem>()
+
+        if (page <= 1) {
+            // প্রথমে মূল হোমপেজ ও /movies/ উভয়ই চেক করা হচ্ছে যেন কোনোভাবেই ১ নম্বর রিসেন্ট মুভি বাদ না পড়ে
+            val homeHtml = fetchHtml("$base/")
+            result.addAll(parseMainPageItems(homeHtml, base))
+
+            if (result.size < 10) {
+                val moviesHtml = fetchHtml("$base/movies/")
+                result.addAll(parseMainPageItems(moviesHtml, base))
+            }
         } else {
-            "$base/movies/page/$page/"
+            val pageHtml = fetchHtml("$base/movies/page/$page/")
+            result.addAll(parseMainPageItems(pageHtml, base))
         }
-        val html = fetchHtml(targetUrl)
-        return parseMainPageItems(html, base)
+
+        return result.distinctBy { it.url }
     }
 
     override suspend fun search(query: String, page: Int): List<MovieItem> {
