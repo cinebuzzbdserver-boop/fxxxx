@@ -70,7 +70,6 @@ class HDWebMoviesProvider : MainAPI {
         }
     }
 
-    // হোমপেজের (<article ... class="item movies">) HTML পার্স করার ফাংশন
     private fun parseMainPageItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
@@ -79,7 +78,6 @@ class HDWebMoviesProvider : MainAPI {
             RegexOption.IGNORE_CASE
         )
         val imgRegex = Regex("""<img[^>]+src="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
-        val qualityRegex = Regex("""<span\s+class="quality"[^>]*>([^<]+)</span>""", RegexOption.IGNORE_CASE)
         val titleLinkRegex = Regex("""<h3>\s*<a\s+href="([^"]+)"[^>]*>([\s\S]*?)</a>\s*</h3>""", RegexOption.IGNORE_CASE)
         val fallbackLinkRegex = Regex("""<a\s+href="([^"]+)"[^>]*>""", RegexOption.IGNORE_CASE)
         val altRegex = Regex("""alt="([^"]+)"""", RegexOption.IGNORE_CASE)
@@ -88,7 +86,6 @@ class HDWebMoviesProvider : MainAPI {
             val block = match.groupValues[1]
 
             val rawImg = imgRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
-            val qualityText = qualityRegex.find(block)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
 
             val titleLinkMatch = titleLinkRegex.find(block)
             val rawUrl = titleLinkMatch?.groupValues?.get(1)?.trim()
@@ -101,7 +98,6 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                // TMDB ইমেজ আরও পরিষ্কার দেখানোর জন্য w185 থেকে w342 করা হলো
                 val fullImg = fixUrl(rawImg, base).replace("/w185/", "/w342/")
 
                 list.add(
@@ -109,9 +105,8 @@ class HDWebMoviesProvider : MainAPI {
                         title = decodeHtmlEntities(rawTitle),
                         image = fullImg,
                         url = fullUrl,
-                        isPoster = true,
-                        referer = "$base/",
-                        quality = qualityText
+                        isPoster = false,
+                        referer = "$base/"
                     )
                 )
             }
@@ -119,7 +114,6 @@ class HDWebMoviesProvider : MainAPI {
         return list.distinctBy { it.url }
     }
 
-    // সার্চ রেজাল্টের (<div class="result-item">) HTML পার্স করার ফাংশন
     private fun parseSearchItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
@@ -148,7 +142,6 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-                // সার্চের ছোট w92 ইমেজকে হাই-রেজোলিউশন পোস্টারে রূপান্তর
                 val fullImg = fixUrl(rawImg, base).replace("/w92/", "/w342/")
 
                 list.add(
@@ -156,14 +149,13 @@ class HDWebMoviesProvider : MainAPI {
                         title = decodeHtmlEntities(rawTitle),
                         image = fullImg,
                         url = fullUrl,
-                        isPoster = true,
+                        isPoster = false,
                         referer = "$base/"
                     )
                 )
             }
         }
 
-        // যদি কোনো কারণে সার্চ পেজে সাধারণ আইটেম স্ট্রাকচার থাকে তবে ফলব্যাক হিসেবে কাজ করবে
         if (list.isEmpty()) {
             return parseMainPageItems(html, base)
         }
@@ -197,7 +189,6 @@ class HDWebMoviesProvider : MainAPI {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // শুধুমাত্র https://tmbcloud.dev এর ডাউনলোড বাটনগুলো খুঁজে বের করার Regex
         val tmbButtonRegex = Regex(
             """<a\s+href="(https?://[^"]*tmbcloud\.dev/[^"]+)"[^>]*>([\s\S]*?)</a>""",
             RegexOption.IGNORE_CASE
@@ -207,7 +198,6 @@ class HDWebMoviesProvider : MainAPI {
             val linkUrl = match.groupValues[1].trim()
             val innerHtml = match.groupValues[2]
 
-            // বাটনের ভেতরের লেখা থেকে "DOWNLOAD" শব্দটি বাদ দিয়ে শুধু কোয়ালিটি (যেমন: 480p, 720p, 1080p HEVC) রাখা হলো
             val buttonText = innerHtml.replace(Regex("<[^>]*>"), " ")
                 .replace(Regex("(?i)\\bdownload\\b"), "")
                 .replace(Regex("\\s+"), " ")
@@ -215,29 +205,25 @@ class HDWebMoviesProvider : MainAPI {
 
             val qualityLabel = buttonText.ifEmpty { "HD" }
 
-            // লিংক এবং কোয়ালিটি একসাথে পাঠানো হচ্ছে যেন resolveDirectLink-এ সঠিক কোয়ালিটি নাম দেখায়
-            rawLinks.add(Pair(qualityLabel, "$linkUrl|||$qualityLabel"))
+            rawLinks.add(Pair(qualityLabel, linkUrl))
         }
 
-        val distinctLinks = rawLinks.distinctBy { it.second.substringBefore("|||") }
+        val distinctLinks = rawLinks.distinctBy { it.second }
 
         return MediaStructure(
             isSeries = false,
-            rawMovieLinks = distinctLinks,
+            rawMovieLinks = distinctLinks.ifEmpty { listOf(Pair("Direct Stream", postUrl)) },
             seasons = emptyList()
         )
     }
 
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? {
         val base = getBaseUrl()
-        val streamUrl = generateUrl.substringBefore("|||").trim()
-        val qualityLabel = generateUrl.substringAfter("|||", "HD").trim().ifEmpty { "HD" }
-
-        if (streamUrl.isEmpty()) return null
+        if (generateUrl.isEmpty()) return null
 
         return StreamItem(
-            quality = qualityLabel,
-            streamUrl = streamUrl,
+            quality = "HD",
+            streamUrl = generateUrl,
             headers = mapOf(
                 "Referer" to "$base/",
                 "User-Agent" to userAgent
