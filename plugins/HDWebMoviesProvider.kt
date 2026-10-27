@@ -411,7 +411,7 @@ class HDWebMoviesProvider : MainAPI {
                     return@withLock null
                 }
 
-                // প্রাপ্ত টোকেন দিয়ে ফাইনাল ডোমেইনের /gen-link.php তে POST রিকোয়েস্ট পাঠানো
+                // প্রাপ্ত টোgকেন দিয়ে ফাইনাল ডোমেইনের /gen-link.php তে POST রিকোয়েস্ট পাঠানো
                 val postEndpoint = "$finalOrigin/gen-link.php"
                 val formBody = FormBody.Builder()
                     .add("type", "r2")
