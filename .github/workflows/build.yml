@@ -42,6 +42,15 @@ jobs:
           cat << 'EOF' > src/com/moviefy/stream/ui/screens/MainAPI.kt
           package com.moviefy.stream.ui.screens
 
+          // TurnstileBridge এর স্টাব যুক্ত করা হলো
+          object TurnstileBridge {
+              suspend fun resolveToken(
+                  siteKey: String, 
+                  domainUrl: String, 
+                  timeoutMs: Long = 120_000L
+              ): String? = null
+          }
+
           data class MovieItem(
               val title: String,
               val image: String,
@@ -92,7 +101,7 @@ jobs:
           for file in plugins/*.kt *.kt; do
             if [ -f "$file" ] && [[ "$(basename "$file")" != "MainAPI.kt" ]]; then
               baseName=$(basename "$file" .kt)
-              outputName=$(echo "$baseName" \vert{} sed 's/Provider$//')
+              outputName=$(echo "$baseName" | sed 's/Provider$//')
 
               echo "Processing Provider: $file"
 
