@@ -310,7 +310,8 @@ class HDWebMoviesProvider : MainAPI {
         val patterns = listOf(
             Regex("""sitekey\s*:\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
             Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+            Regex("""['"](0x4[a-zA-Z0-9_-]{10,})['"]""")
         )
         for (regex in patterns) {
             val match = regex.find(html)
@@ -359,7 +360,7 @@ class HDWebMoviesProvider : MainAPI {
         if (generateUrl.isBlank()) return@withContext null
 
         resolveMutex.withLock {
-            sendTelegramLog("🚀 [1/6] resolveDirectLink Triggered!\nURL: $generateUrl")
+            sendTelegramLog("🚀 [1/5] resolveDirectLink Triggered!\nURL: $generateUrl")
 
             val freshCookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
             val scopedCookieJar = object : CookieJar {
@@ -440,7 +441,7 @@ class HDWebMoviesProvider : MainAPI {
                 val siteKey = extractTurnstileSiteKey(pageHtml)
 
                 sendTelegramLog(
-                    "🌐 [2/6] Landed on Download Page:\n" +
+                    "🌐 [2/5] Landed on Download Page:\n" +
                     "HTTP Status: $responseCode\n" +
                     "Final URL: $currentUrl\n" +
                     "Cookies: ${savedCookies.ifEmpty { "None" }}\n" +
@@ -485,7 +486,7 @@ class HDWebMoviesProvider : MainAPI {
                     } catch (_: Throwable) {}
                 }
 
-                sendTelegramLog("📩 [3/6] step2.php Response ($step2Code):\n$step2Response\nExtracted TOKEN_B: $tokenB")
+                sendTelegramLog("📩 [3/5] step2.php Response ($step2Code):\n$step2Response\nExtracted TOKEN_B: $tokenB")
 
                 if (tokenB.isEmpty()) {
                     sendTelegramLog("❌ [Error] TOKEN_B was not generated.")
@@ -493,26 +494,26 @@ class HDWebMoviesProvider : MainAPI {
                 }
 
                 // ধাপ ৩: UI-তে Turnstile রেন্ডার করানো ও টোকেনের জন্য অপেক্ষা
-                sendTelegramLog("⏳ [4/6] Turnstile Visible on UI now. Solving...")
-                val cfToken = requestTurnstileToken(siteKey, finalOrigin)
+                sendTelegramLog("⏳ [4/5] Turnstile Visible on UI now. Solving for R2...")
+                val cfTokenR2 = requestTurnstileToken(siteKey, finalOrigin)
 
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramLog("❌ [Error] Turnstile Verification Failed/Timed out!")
+                if (cfTokenR2.isNullOrBlank()) {
+                    sendTelegramLog("❌ [Error] Turnstile Verification Failed/Timed out for R2!")
                     return@withLock null
                 }
 
-                sendTelegramLog("🧩 [Turnstile Solved]:\nToken: ${cfToken.take(30)}...")
+                sendTelegramLog("🧩 [Turnstile Solved for R2]: Token: ${cfTokenR2.take(30)}...")
 
-                // ধাপ ৪: /gen-link.php তে POST পাঠিয়ে রেসপন্স নেওয়া
+                // ধাপ ৪: /gen-link.php তে POST পাঠিয়ে (type=r2) রেসপন্স নেওয়া
                 val genUrl = "$finalOrigin/gen-link.php"
-                val rawGenBody = "type=r2" +
+                val rawGenBodyR2 = "type=r2" +
                         "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
                         "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
-                        "&cf_turnstile_response=${URLEncoder.encode(cfToken, "UTF-8")}"
+                        "&cf_turnstile_response=${URLEncoder.encode(cfTokenR2, "UTF-8")}"
 
-                val genReq = Request.Builder()
+                val genReqR2 = Request.Builder()
                     .url(genUrl)
-                    .post(rawGenBody.toRequestBody(formMediaType))
+                    .post(rawGenBodyR2.toRequestBody(formMediaType))
                     .header("User-Agent", userAgent)
                     .header("Referer", currentUrl)
                     .header("Origin", finalOrigin)
@@ -520,28 +521,35 @@ class HDWebMoviesProvider : MainAPI {
                     .header("Accept", "application/json, text/javascript, */*; q=0.01")
                     .build()
 
-                var genLinkResponse = ""
-                var genCode = 0
-                sessionClient.newCall(genReq).execute().use { resp ->
-                    genCode = resp.code
-                    genLinkResponse = resp.body?.string().orEmpty()
+                var genLinkResponseR2 = ""
+                sessionClient.newCall(genReqR2).execute().use { resp ->
+                    genLinkResponseR2 = resp.body?.string().orEmpty()
                 }
 
-                sendTelegramLog("🎬 [5/6] gen-link.php Response ($genCode):\n$genLinkResponse")
+                sendTelegramLog("🎬 [5/5] gen-link.php (R2) Response:\n$genLinkResponseR2")
 
-                if (genLinkResponse.isNotBlank()) {
-                    val json = JSONObject(genLinkResponse)
-                    var directVideoUrl = json.optString("url", "")
-                        .ifEmpty { json.optString("download_url", "") }
-                        .ifEmpty { json.optString("link", "") }
+                var finalDirectVideoUrl = ""
+                var isR2Success = false
+
+                if (genLinkResponseR2.isNotBlank()) {
+                    val jsonR2 = JSONObject(genLinkResponseR2)
+                    
+                    // আপডেট হওয়া token_b যদি থাকে তবে তা ফলব্যাকের জন্য সেভ করে রাখা হচ্ছে
+                    val newTokenB = jsonR2.optString("new_token_b", "").trim()
+                    if (newTokenB.isNotEmpty()) {
+                        tokenB = newTokenB
+                    }
+
+                    var tempUrl = jsonR2.optString("url", "")
+                        .ifEmpty { jsonR2.optString("download_url", "") }
+                        .ifEmpty { jsonR2.optString("link", "") }
                         .trim()
 
-                    // নতুন লজিক: যদি url-এর মধ্যে /cloudfiles/ থাকে, তবে cloudfiles-worker.php তে কল করে আসল লিংক বের করা
-                    if (directVideoUrl.contains("/cloudfiles/")) {
-                        val fileHash = directVideoUrl.substringAfterLast("/")
+                    // R2-এর রেসপন্সে যদি /cloudfiles/ থাকে, তবে ওয়ার্কার কল করা
+                    if (tempUrl.contains("/cloudfiles/")) {
+                        val fileHash = tempUrl.substringAfterLast("/")
                         val workerUrl = "$finalOrigin/cloudfiles-worker.php?c=$fileHash&poll=3"
-                        
-                        sendTelegramLog("🔄 [Step 5.1] Fetching final link from worker:\n$workerUrl")
+                        sendTelegramLog("🔄 [R2 Worker] Fetching from:\n$workerUrl")
                         
                         val workerReq = Request.Builder()
                             .url(workerUrl)
@@ -553,35 +561,118 @@ class HDWebMoviesProvider : MainAPI {
                             .build()
                             
                         var workerRespText = ""
-                        var workerCode = 0
                         sessionClient.newCall(workerReq).execute().use { wResp ->
-                            workerCode = wResp.code
                             workerRespText = wResp.body?.string().orEmpty()
                         }
                         
-                        sendTelegramLog("📥 [Step 5.2] Worker Response ($workerCode):\n$workerRespText")
+                        sendTelegramLog("📥 [R2 Worker] Response:\n$workerRespText")
                         
                         if (workerRespText.isNotBlank()) {
                             try {
                                 val wJson = JSONObject(workerRespText)
-                                if (wJson.optBoolean("ready", false) || wJson.has("download_url")) {
-                                    directVideoUrl = wJson.optString("download_url", directVideoUrl).trim()
+                                if (wJson.optBoolean("ready", false) || wJson.has("download_url") || wJson.has("url")) {
+                                    tempUrl = wJson.optString("download_url", wJson.optString("url", tempUrl)).trim()
                                 }
                             } catch (_: Throwable) {}
                         }
                     }
 
-                    if (directVideoUrl.startsWith("http")) {
-                        sendTelegramLog("🎉 [6/6] SUCCESS! Final Stream URL Ready:\n$directVideoUrl")
-                        return@withLock StreamItem(
-                            quality = "FastCloud R2",
-                            streamUrl = directVideoUrl,
-                            headers = mapOf(
-                                "User-Agent" to userAgent,
-                                "Referer" to "$finalOrigin/"
-                            )
-                        )
+                    if (tempUrl.startsWith("http")) {
+                        finalDirectVideoUrl = tempUrl
+                        isR2Success = true
                     }
+                }
+
+                // ==========================================
+                // 🛑 ফলব্যাক মেকানিজম (R2 কাজ না করলে FSLv2new)
+                // ==========================================
+                if (!isR2Success || finalDirectVideoUrl.isEmpty()) {
+                    sendTelegramLog("⚠️ [Fallback] R2 stream failed/not found. Trying fslv2new fallback...")
+                    
+                    // ফলব্যাকের জন্য নতুন টার্নস্টাইল টোকেন সলভ করা
+                    val cfTokenFsl = requestTurnstileToken(siteKey, finalOrigin)
+                    if (cfTokenFsl.isNullOrBlank()) {
+                        sendTelegramLog("❌ [Fallback Error] Turnstile solving failed for fslv2new!")
+                        return@withLock null
+                    }
+                    
+                    sendTelegramLog("🧩 [Turnstile Solved for Fallback]: Token: ${cfTokenFsl.take(25)}...")
+
+                    val rawGenBodyFsl = "type=fslv2new" +
+                            "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
+                            "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
+                            "&cf_turnstile_response=${URLEncoder.encode(cfTokenFsl, "UTF-8")}"
+
+                    val genReqFsl = Request.Builder()
+                        .url(genUrl) // Same gen-link.php endpoint
+                        .post(rawGenBodyFsl.toRequestBody(formMediaType))
+                        .header("User-Agent", userAgent)
+                        .header("Referer", currentUrl)
+                        .header("Origin", finalOrigin)
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                        .build()
+
+                    var genLinkResponseFsl = ""
+                    sessionClient.newCall(genReqFsl).execute().use { resp ->
+                        genLinkResponseFsl = resp.body?.string().orEmpty()
+                    }
+
+                    sendTelegramLog("🎬 [Fallback] gen-link.php (fslv2new) Response:\n$genLinkResponseFsl")
+
+                    if (genLinkResponseFsl.isNotBlank()) {
+                        val fbJson = JSONObject(genLinkResponseFsl)
+                        var fbTempUrl = fbJson.optString("url", "").trim()
+                        
+                        // FSLv2 রেসপন্সে যদি /fslv2/ থাকে, তবে ওয়ার্কার কল করা
+                        if (fbTempUrl.contains("/fslv2/")) {
+                            val hash = fbTempUrl.substringAfterLast("/")
+                            val fbWorkerUrl = "$finalOrigin/fslv2-worker.php?t=$hash&poll=1"
+                            sendTelegramLog("🔄 [Fallback Worker] Fetching from:\n$fbWorkerUrl")
+                            
+                            val fbWorkerReq = Request.Builder()
+                                .url(fbWorkerUrl)
+                                .header("User-Agent", userAgent)
+                                .header("Referer", currentUrl)
+                                .header("Origin", finalOrigin)
+                                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                                .header("X-Requested-With", "XMLHttpRequest")
+                                .build()
+                                
+                            var fbWorkerResp = ""
+                            sessionClient.newCall(fbWorkerReq).execute().use { wResp ->
+                                fbWorkerResp = wResp.body?.string().orEmpty()
+                            }
+                            
+                            sendTelegramLog("📥 [Fallback Worker] Response:\n$fbWorkerResp")
+                            
+                            if (fbWorkerResp.isNotBlank()) {
+                                try {
+                                    val fwJson = JSONObject(fbWorkerResp)
+                                    if (fwJson.optBoolean("ready", false) || fwJson.has("url")) {
+                                        fbTempUrl = fwJson.optString("url", fbTempUrl).trim()
+                                    }
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                        
+                        if (fbTempUrl.startsWith("http")) {
+                            finalDirectVideoUrl = fbTempUrl
+                        }
+                    }
+                }
+
+                // ফাইনাল স্ট্রিমিং URL রিটার্ন করা
+                if (finalDirectVideoUrl.startsWith("http")) {
+                    sendTelegramLog("🎉 [SUCCESS] Final Stream URL Ready:\n$finalDirectVideoUrl")
+                    return@withLock StreamItem(
+                        quality = "FastCloud Stream",
+                        streamUrl = finalDirectVideoUrl,
+                        headers = mapOf(
+                            "User-Agent" to userAgent,
+                            "Referer" to "$finalOrigin/"
+                        )
+                    )
                 }
 
                 null
