@@ -4,7 +4,6 @@ import com.moviefy.stream.ui.screens.MainAPI
 import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.StreamItem
-import com.moviefy.stream.ui.screens.TurnstileBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -12,16 +11,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.FormBody
 import okhttp3.HttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -37,28 +34,24 @@ class HDWebMoviesProvider : MainAPI {
     private val telegramBotToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
     private val telegramChatId = "5548923721"
 
-    // সরাসরি Java HttpsURLConnection দিয়ে টেলিগ্রামে পাঠানো, যাতে কোনোভাবেই মিস না হয়
-    private fun sendTelegramSync(msg: String) {
-        Thread {
-            try {
-                val url = URL("https://api.telegram.org/bot$telegramBotToken/sendMessage")
-                val conn = url.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.connectTimeout = 15000
-                conn.readTimeout = 15000
-                conn.doOutput = true
-                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+    private val baseClient = OkHttpClient.Builder()
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
-                val payload = "chat_id=" + URLEncoder.encode(telegramChatId, "UTF-8") +
-                        "&text=" + URLEncoder.encode(msg.take(3800), "UTF-8")
-
-                OutputStreamWriter(conn.outputStream).use { it.write(payload) }
-                conn.responseCode
-                conn.disconnect()
-            } catch (e: Throwable) {
-                e.printStackTrace()
-            }
-        }.start()
+    // টেলিগ্রামে মেসেজ পাঠানোর ফাংশন (blocking call যাতে মেসেজ মিস না হয়)
+    private fun sendTgLog(text: String) {
+        try {
+            val tgUrl = "https://api.telegram.org/bot$telegramBotToken/sendMessage"
+            val body = FormBody.Builder()
+                .add("chat_id", telegramChatId)
+                .add("text", text.take(3900))
+                .build()
+            val req = Request.Builder().url(tgUrl).post(body).build()
+            baseClient.newCall(req).execute().close()
+        } catch (_: Throwable) {}
     }
 
     private fun getBaseUrl(): String {
@@ -76,16 +69,10 @@ class HDWebMoviesProvider : MainAPI {
                 reqBuilder.header("Referer", referer)
             }
 
-            OkHttpClient.Builder()
-                .connectTimeout(20, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)
-                .followRedirects(true)
-                .build()
-                .newCall(reqBuilder.build()).execute().use { response ->
-                    response.body?.string().orEmpty()
-                }
+            baseClient.newCall(reqBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty()
+            }
         } catch (e: Exception) {
-            e.printStackTrace()
             ""
         }
     }
@@ -149,7 +136,6 @@ class HDWebMoviesProvider : MainAPI {
             if (attrs.contains("post-featured", ignoreCase = true)) continue
             if (block.contains("""class="featu"""", ignoreCase = true)) continue
             if (block.contains("""class="data dfeatur"""", ignoreCase = true)) continue
-
             if (!block.contains("""class="poster"""", ignoreCase = true)) continue
 
             val fullImg = extractImageFromBlock(block, base)
@@ -166,7 +152,6 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-
                 list.add(
                     MovieItem(
                         title = decodeHtmlEntities(rawTitle),
@@ -206,7 +191,6 @@ class HDWebMoviesProvider : MainAPI {
 
             if (rawUrl.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawUrl, base)
-
                 list.add(
                     MovieItem(
                         title = decodeHtmlEntities(rawTitle),
@@ -257,16 +241,16 @@ class HDWebMoviesProvider : MainAPI {
         return parseSearchItems(html, base)
     }
 
-    override suspend fun loadMediaStructure(postUrl: String): MediaStructure {
+    override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        val cloudButtonRegex = Regex(
-            """<a\s+[^>]*href="(https?://[^"]*(?:tmbcloud|hwmcloud|fastcdn|hubcloud|r2)[^"]*)"[^>]*>([\s\S]*?)</a>""",
+        val tmbButtonRegex = Regex(
+            """<a\s+[^>]*href="(https?://[^"]*tmbcloud\.[a-zA-Z0-9]+/[^"]+)"[^>]*>([\s\S]*?)</a>""",
             RegexOption.IGNORE_CASE
         )
 
-        for (match in cloudButtonRegex.findAll(html)) {
+        for (match in tmbButtonRegex.findAll(html)) {
             val linkUrl = match.groupValues[1].trim()
             val innerHtml = match.groupValues[2]
 
@@ -280,8 +264,9 @@ class HDWebMoviesProvider : MainAPI {
         }
 
         val distinctLinks = rawLinks.distinctBy { it.second }
+        sendTgLog("📂 [loadMediaStructure]\nPost: $postUrl\nFound Links (${distinctLinks.size}):\n" + distinctLinks.joinToString("\n") { "${it.first} -> ${it.second}" })
 
-        return MediaStructure(
+        MediaStructure(
             isSeries = false,
             rawMovieLinks = distinctLinks,
             seasons = emptyList()
@@ -313,8 +298,7 @@ class HDWebMoviesProvider : MainAPI {
         val patterns = listOf(
             Regex("""sitekey\s*:\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
             Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""['"](0x4[a-zA-Z0-9_-]{10,})['"]""")
+            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
         )
         for (regex in patterns) {
             val match = regex.find(html)
@@ -329,19 +313,8 @@ class HDWebMoviesProvider : MainAPI {
         return regex.find(html)?.groupValues?.get(1)?.trim()
     }
 
-    private suspend fun requestTurnstileToken(siteKey: String, domainOrigin: String): String? {
-        sendTelegramSync("🤖 [Turnstile]: Calling UI widget\nSiteKey: $siteKey\nDomain: $domainOrigin")
-        try {
-            val directToken = TurnstileBridge.resolveToken(
-                siteKey = siteKey,
-                domainUrl = domainOrigin,
-                timeoutMs = 120_000L
-            )
-            if (!directToken.isNullOrBlank()) {
-                return directToken.trim()
-            }
-        } catch (_: Throwable) {}
-
+    // কোনো এক্সটার্নাল ক্লাস রেফারেন্স ছাড়াই HomeScreen-এর সাথে System Property ব্রিজের মাধ্যমে যোগাযোগ
+    private suspend fun solveTurnstileViaSystemProps(siteKey: String, domainOrigin: String): String? {
         System.setProperty("moviefy.turnstile.token", "")
         System.setProperty("moviefy.turnstile.siteKey", siteKey)
         System.setProperty("moviefy.turnstile.domainUrl", domainOrigin)
@@ -353,7 +326,7 @@ class HDWebMoviesProvider : MainAPI {
                 System.setProperty("moviefy.turnstile.token", "")
                 return solved
             }
-            delay(300L)
+            delay(250L)
         }
         return null
     }
@@ -362,7 +335,7 @@ class HDWebMoviesProvider : MainAPI {
         if (generateUrl.isBlank()) return@withContext null
 
         resolveMutex.withLock {
-            sendTelegramSync("🚀 [1/6] resolveDirectLink Called!\nURL: $generateUrl")
+            sendTgLog("🚀 [1/5] Starting resolveDirectLink:\n$generateUrl")
 
             val freshCookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
             val scopedCookieJar = object : CookieJar {
@@ -398,8 +371,9 @@ class HDWebMoviesProvider : MainAPI {
                 var currentUrl = generateUrl.trim()
                 var pageHtml = ""
                 var refererUrl = "$base/"
+                var statusCode = 0
 
-                // ধাপ ১: রিডাইরেকশন ফলো করে আসল ডাউনলোড পেজে যাওয়া
+                // ধাপ ১: রিডাইরেকশন ফলো করে আসল পেজে যাওয়া ও PHPSESSID কুকি সংগ্রহ করা
                 for (step in 0 until 4) {
                     val req = Request.Builder()
                         .url(currentUrl)
@@ -410,6 +384,7 @@ class HDWebMoviesProvider : MainAPI {
                         .build()
 
                     sessionClient.newCall(req).execute().use { resp ->
+                        statusCode = resp.code
                         currentUrl = resp.request.url.toString()
                         pageHtml = resp.body?.string().orEmpty()
                     }
@@ -417,8 +392,7 @@ class HDWebMoviesProvider : MainAPI {
                     if (pageHtml.contains("initTurnstile", ignoreCase = true) ||
                         pageHtml.contains("PAGE_ID", ignoreCase = true) ||
                         pageHtml.contains("TOKEN_A", ignoreCase = true) ||
-                        pageHtml.contains("step2.php", ignoreCase = true) ||
-                        pageHtml.contains("cf-turnstile", ignoreCase = true)
+                        pageHtml.contains("step2.php", ignoreCase = true)
                     ) {
                         break
                     }
@@ -434,104 +408,110 @@ class HDWebMoviesProvider : MainAPI {
 
                 val finalUri = URI(currentUrl)
                 val finalOrigin = "${finalUri.scheme}://${finalUri.host}"
-                val currentCookies = freshCookieStore[finalUri.host]?.joinToString("; ") { "${it.name}=${it.value}" }.orEmpty()
+                val savedCookies = freshCookieStore[finalUri.host]?.joinToString("; ") { "${it.name}=${it.value}" }.orEmpty()
 
-                sendTelegramSync("🌐 [2/6] Landed on Final Page:\nURL: $currentUrl\nOrigin: $finalOrigin\nCookies: $currentCookies\nHTML Length: ${pageHtml.length}")
-
-                // ধাপ ২: PAGE_ID, TOKEN_A এবং Turnstile sitekey সংগ্রহ করা
                 val pageId = extractScriptVar(pageHtml, "PAGE_ID")
                     ?: Regex("""data-page\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)?.trim()
-
                 val tokenA = extractScriptVar(pageHtml, "TOKEN_A")
                 val siteKey = extractTurnstileSiteKey(pageHtml)
 
-                sendTelegramSync("🔑 [3/6] Params:\nPAGE_ID: $pageId\nTOKEN_A: $tokenA\nSiteKey: $siteKey")
+                sendTgLog(
+                    "🌐 [2/5] Landed Page:\n" +
+                    "HTTP Code: $statusCode\n" +
+                    "Final URL: $currentUrl\n" +
+                    "Cookies: ${savedCookies.ifEmpty { "NONE" }}\n" +
+                    "PAGE_ID: $pageId\n" +
+                    "TOKEN_A: $tokenA\n" +
+                    "SiteKey: $siteKey"
+                )
 
-                if (siteKey.isNullOrEmpty()) {
-                    sendTelegramSync("❌ [Error]: Turnstile siteKey not found in HTML!\nSnippet: ${pageHtml.take(400)}")
+                if (pageId.isNullOrEmpty() || tokenA.isNullOrEmpty() || siteKey.isNullOrEmpty()) {
+                    sendTgLog("❌ [Blocked/Error] Missing Parameters! HTML Preview:\n${pageHtml.take(500)}")
                     return@withLock null
                 }
 
-                // ধাপ ৩: সবার আগে Turnstile রিকোয়েস্ট উইজেটে পাঠানো যাতে ইউজার দেখতে পায় এবং সলভ করতে পারে
-                val cfToken = requestTurnstileToken(siteKey, finalOrigin)
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramSync("❌ [Error]: Turnstile token resolution failed or timed out!")
-                    return@withLock null
-                }
+                // ধাপ ২: পেজ লোড হওয়ার সাথে সাথে যেভাবে ব্রাউজার /step2.php কল করে TOKEN_B আনে, ঠিক সেভাবে কল করা
+                val step2Url = "$finalOrigin/step2.php"
+                val rawStep2Payload = "token_a=${URLEncoder.encode(tokenA, "UTF-8")}&page_id=${URLEncoder.encode(pageId, "UTF-8")}"
+                val formMediaType = "application/x-www-form-urlencoded".toMediaType()
 
-                sendTelegramSync("🧩 [4/6] Turnstile Solved:\nToken: ${cfToken.take(25)}...")
-
-                // ধাপ ৪: /step2.php তে হুবহু ব্রাউজার স্টাইলে রিকোয়েস্ট পাঠিয়ে TOKEN_B সংগ্রহ করা
-                var tokenB = ""
-                if (!pageId.isNullOrEmpty() && !tokenA.isNullOrEmpty()) {
-                    val step2Url = "$finalOrigin/step2.php"
-                    val step2RawBody = "token_a=${URLEncoder.encode(tokenA, "UTF-8")}&page_id=${URLEncoder.encode(pageId, "UTF-8")}"
-                    val mediaType = "application/x-www-form-urlencoded".toMediaType()
-
-                    val step2Req = Request.Builder()
-                        .url(step2Url)
-                        .post(step2RawBody.toRequestBody(mediaType))
-                        .header("User-Agent", userAgent)
-                        .header("Referer", currentUrl)
-                        .header("Origin", finalOrigin)
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .header("Accept", "*/*")
-                        .build()
-
-                    var step2RespStr = ""
-                    sessionClient.newCall(step2Req).execute().use { resp ->
-                        step2RespStr = resp.body?.string().orEmpty()
-                    }
-
-                    sendTelegramSync("📩 [5/6] step2.php Response:\nBody: $step2RespStr")
-
-                    if (step2RespStr.isNotBlank()) {
-                        try {
-                            val json = JSONObject(step2RespStr)
-                            tokenB = json.optString("token_b", "").trim()
-                        } catch (_: Throwable) {}
-                    }
-                }
-
-                // ধাপ ৫: gen-link.php তে POST পাঠানো (token_b থাকলে সহ, না থাকলে ডিরেক্ট ফর্ম)
-                val postEndpoint = "$finalOrigin/gen-link.php"
-                val genBodyBuilder = StringBuilder()
-                genBodyBuilder.append("type=").append(URLEncoder.encode("r2", "UTF-8"))
-                if (!pageId.isNullOrEmpty()) {
-                    genBodyBuilder.append("&page_id=").append(URLEncoder.encode(pageId, "UTF-8"))
-                }
-                if (tokenB.isNotEmpty()) {
-                    genBodyBuilder.append("&token_b=").append(URLEncoder.encode(tokenB, "UTF-8"))
-                }
-                genBodyBuilder.append("&cf_turnstile_response=").append(URLEncoder.encode(cfToken, "UTF-8"))
-
-                val genMediaType = "application/x-www-form-urlencoded".toMediaType()
-                val postRequest = Request.Builder()
-                    .url(postEndpoint)
-                    .post(genBodyBuilder.toString().toRequestBody(genMediaType))
+                val step2Req = Request.Builder()
+                    .url(step2Url)
+                    .post(rawStep2Payload.toRequestBody(formMediaType))
                     .header("User-Agent", userAgent)
                     .header("Referer", currentUrl)
                     .header("Origin", finalOrigin)
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                    .header("Accept", "*/*")
                     .build()
 
-                var genLinkResponse = ""
-                sessionClient.newCall(postRequest).execute().use { postResp ->
-                    genLinkResponse = postResp.body?.string().orEmpty()
+                var tokenB = ""
+                var step2ResponseText = ""
+                var step2Code = 0
+
+                sessionClient.newCall(step2Req).execute().use { resp ->
+                    step2Code = resp.code
+                    step2ResponseText = resp.body?.string().orEmpty()
                 }
 
-                sendTelegramSync("🎬 [6/6] gen-link.php Response:\n$genLinkResponse")
+                if (step2ResponseText.isNotBlank()) {
+                    try {
+                        val json = JSONObject(step2ResponseText)
+                        tokenB = json.optString("token_b", "").trim()
+                    } catch (_: Throwable) {}
+                }
 
-                if (genLinkResponse.isNotBlank()) {
-                    val json = JSONObject(genLinkResponse)
+                sendTgLog("📩 [3/5] step2.php Response (HTTP $step2Code):\nRaw: $step2ResponseText\nExtracted TOKEN_B: $tokenB")
+
+                if (tokenB.isEmpty()) {
+                    sendTgLog("❌ [Error] TOKEN_B empty! Stopping.")
+                    return@withLock null
+                }
+
+                // ধাপ ৩: HomeScreen-এ Turnstile ভিজিবল করানো এবং সলভ হওয়া পর্যন্ত অপেক্ষা করা
+                sendTgLog("⏳ [4/5] Showing Turnstile on UI...\nSiteKey: $siteKey\nDomain: $finalOrigin")
+                val cfToken = solveTurnstileViaSystemProps(siteKey, finalOrigin)
+
+                if (cfToken.isNullOrBlank()) {
+                    sendTgLog("❌ [Error] Turnstile Timed Out or Cancelled!")
+                    return@withLock null
+                }
+
+                sendTgLog("✅ [Turnstile Solved] Token received (${cfToken.length} chars): ${cfToken.take(25)}...")
+
+                // ধাপ ৪: /gen-link.php তে type=r2, page_id, token_b এবং cf_turnstile_response পাঠিয়ে ভিডিও লিংক তৈরি করা
+                val genUrl = "$finalOrigin/gen-link.php"
+                val rawGenPayload = "type=r2" +
+                        "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
+                        "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
+                        "&cf_turnstile_response=${URLEncoder.encode(cfToken, "UTF-8")}"
+
+                val genReq = Request.Builder()
+                    .url(genUrl)
+                    .post(rawGenPayload.toRequestBody(formMediaType))
+                    .header("User-Agent", userAgent)
+                    .header("Referer", currentUrl)
+                    .header("Origin", finalOrigin)
+                    .header("Accept", "*/*")
+                    .build()
+
+                var genRespText = ""
+                var genCode = 0
+                sessionClient.newCall(genReq).execute().use { resp ->
+                    genCode = resp.code
+                    genRespText = resp.body?.string().orEmpty()
+                }
+
+                sendTgLog("🎬 [5/5] gen-link.php Response (HTTP $genCode):\n$genRespText")
+
+                if (genRespText.isNotBlank()) {
+                    val json = JSONObject(genRespText)
                     val directVideoUrl = json.optString("url", "")
                         .ifEmpty { json.optString("download_url", "") }
                         .ifEmpty { json.optString("link", "") }
                         .trim()
 
-                    if (directVideoUrl.isNotEmpty() && directVideoUrl.startsWith("http")) {
-                        sendTelegramSync("🎉 [SUCCESS] Video Link Found:\n$directVideoUrl")
+                    if (directVideoUrl.startsWith("http")) {
+                        sendTgLog("🎉 [SUCCESS] Final Video Stream:\n$directVideoUrl")
                         return@withLock StreamItem(
                             quality = "FastCloud R2",
                             streamUrl = directVideoUrl,
@@ -544,9 +524,8 @@ class HDWebMoviesProvider : MainAPI {
                 }
 
                 null
-            } catch (e: Exception) {
-                e.printStackTrace()
-                sendTelegramSync("⚠️ [Exception]: ${e.localizedMessage ?: e.javaClass.simpleName}")
+            } catch (e: Throwable) {
+                sendTgLog("⚠️ [Exception]: ${e.javaClass.simpleName}: ${e.localizedMessage}")
                 null
             }
         }
