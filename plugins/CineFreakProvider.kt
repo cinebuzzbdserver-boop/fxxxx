@@ -345,7 +345,7 @@ class CineFreakProvider : MainAPI {
                 val cfToken = requestTurnstileToken(siteKey, domainOrigin)
                 if (cfToken.isNullOrBlank()) return@withLock null
 
-                // ধাপ ৪: /unlock এন্ডপয়েন্টে POST রিকোয়েস্ট পাঠিয়ে বাটন সম্বলিত HTML সংগ্রহ
+                // ধাপ ৪: /unlock এন্ডপয়েন্টে POST রিকোয়েস্ট পাঠিয়ে বাটন সম্বলিত HTML ও cf_pass কুকি সংগ্রহ
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
                 val unlockBody = "ts=${URLEncoder.encode(cfToken, "UTF-8")}&bc=${URLEncoder.encode(nToken, "UTF-8")}"
@@ -361,7 +361,19 @@ class CineFreakProvider : MainAPI {
                     .build()
 
                 var unlockHtml = ""
+                var cfPassValue = ""
+
                 sessionClient.newCall(unlockReq).execute().use { resp ->
+                    // Set-Cookie রেসপন্স হেডার থেকে cf_pass ফিল্টার করা
+                    val setCookieHeaders = resp.headers("Set-Cookie")
+                    for (header in setCookieHeaders) {
+                        val cookieMatcher = Regex("""cf_pass=([^;]+)""").find(header)
+                        if (cookieMatcher != null) {
+                            cfPassValue = cookieMatcher.groupValues[1].trim()
+                            break
+                        }
+                    }
+
                     val respBody = resp.body?.string().orEmpty()
                     if (respBody.isNotBlank()) {
                         try {
@@ -369,8 +381,19 @@ class CineFreakProvider : MainAPI {
                             if (json.optBoolean("ok", false)) {
                                 unlockHtml = json.optString("html", "")
                             }
+                            // যদি সার্ভার হেডারের বদলে JSON এর ভেতরে cf_pass পাঠায়
+                            if (cfPassValue.isEmpty() && json.has("cf_pass")) {
+                                cfPassValue = json.optString("cf_pass", "").trim()
+                            }
                         } catch (_: Throwable) {}
                     }
+                }
+
+                // যদি রেসপন্স হেডারে সরাসরি না মিলে তবে CookieJar মেমোরি স্টোর চেক করা
+                if (cfPassValue.isEmpty()) {
+                    val currentHost = URI(cleanUrl).host
+                    val storedCookies = freshCookieStore[currentHost] ?: emptyList()
+                    cfPassValue = storedCookies.firstOrNull { it.name == "cf_pass" }?.value.orEmpty()
                 }
 
                 if (unlockHtml.isBlank()) return@withLock null
@@ -393,46 +416,62 @@ class CineFreakProvider : MainAPI {
 
                 val finalDownloadTarget = fixUrl(fslPath, domainOrigin)
 
-                // ধাপ ৬: ফাইনাল রিডাইরেকশন ট্র্যাক করা এবং আসল মিডিয়া লিঙ্ক বের করা
-                val finalRedirectClient = sessionClient.newBuilder()
-                    .followRedirects(true)
-                    .followSslRedirects(true)
+                // ধাপ ৬: রিডাইরেকশন অটো-ফলো বন্ধ রেখে cf_pass কুকিসহ Location হেডার বের করা
+                val noRedirectClient = sessionClient.newBuilder()
+                    .followRedirects(false)
+                    .followSslRedirects(false)
                     .build()
 
-                val directReq = Request.Builder()
+                val cookieHeaderBuilder = StringBuilder()
+                if (cfPassValue.isNotEmpty()) {
+                    cookieHeaderBuilder.append("cf_pass=$cfPassValue; ")
+                }
+
+                val targetHttpUrl = finalDownloadTarget.toHttpUrlOrNull()
+                if (targetHttpUrl != null) {
+                    val jarCookies = scopedCookieJar.loadForRequest(targetHttpUrl)
+                    for (c in jarCookies) {
+                        if (c.name != "cf_pass") {
+                            cookieHeaderBuilder.append("${c.name}=${c.value}; ")
+                        }
+                    }
+                }
+                val resolvedCookieStr = cookieHeaderBuilder.toString().trimEnd(';', ' ')
+
+                val directReqBuilder = Request.Builder()
                     .url(finalDownloadTarget)
                     .header("User-Agent", userAgent)
                     .header("Referer", cleanUrl)
-                    .build()
+
+                if (resolvedCookieStr.isNotBlank()) {
+                    directReqBuilder.header("Cookie", resolvedCookieStr)
+                }
 
                 var resolvedStreamUrl = finalDownloadTarget
-                finalRedirectClient.newCall(directReq).execute().use { finalResp ->
-                    resolvedStreamUrl = finalResp.request.url.toString()
+
+                noRedirectClient.newCall(directReqBuilder.build()).execute().use { finalResp ->
+                    val statusCode = finalResp.code
+                    // 3xx রিডাইরেকশন কোড চেক করে Location হেডার এক্সট্র্যাক্ট করা
+                    if (statusCode in 300..399) {
+                        val redirectLocation = finalResp.header("Location")
+                        if (!redirectLocation.isNullOrBlank()) {
+                            resolvedStreamUrl = fixUrl(redirectLocation, domainOrigin)
+                        }
+                    }
                 }
 
-                // টাইপ-সেফ উপায়ে HttpUrl পার্স করা যাতে নাল বা সিনট্যাক্স এরর না হয়
-                val targetHttpUrl = resolvedStreamUrl.toHttpUrlOrNull()
-                    ?: cleanUrl.toHttpUrlOrNull()
-
-                val cookieHeaderValue = if (targetHttpUrl != null) {
-                    val cookies = scopedCookieJar.loadForRequest(targetHttpUrl)
-                    cookies.joinToString("; ") { "${it.name}=${it.value}" }
-                } else {
-                    ""
-                }
-
-                val headers = mutableMapOf(
+                val finalHeaders = mutableMapOf(
                     "User-Agent" to userAgent,
                     "Referer" to "$domainOrigin/"
                 )
-                if (cookieHeaderValue.isNotBlank()) {
-                    headers["Cookie"] = cookieHeaderValue
+                if (resolvedCookieStr.isNotBlank()) {
+                    finalHeaders["Cookie"] = resolvedCookieStr
                 }
 
                 StreamItem(
                     quality = "FastCloud FSL",
                     streamUrl = resolvedStreamUrl,
-                    headers = headers
+                    headers = finalHeaders
                 )
             } catch (_: Throwable) {
                 null
