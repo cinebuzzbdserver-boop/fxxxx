@@ -443,90 +443,13 @@ class HDWebMoviesProvider : MainAPI {
 
                 val genUrl = "$finalOrigin/gen-link.php"
                 var finalDirectVideoUrl = ""
-                var isFslSuccess = false
+                var isR2Success = false
 
                 // ==========================================
-                // ধাপ ৩: প্রাইমারি মেথড -> fslv2new (FSLv2)
+                // ধাপ ৩: প্রাইমারি মেথড -> r2 (CloudFiles)
                 // ==========================================
-                val cfTokenFsl = requestTurnstileToken(siteKey, finalOrigin)
-                if (!cfTokenFsl.isNullOrBlank()) {
-                    val rawGenBodyFsl = "type=fslv2new" +
-                            "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
-                            "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
-                            "&cf_turnstile_response=${URLEncoder.encode(cfTokenFsl, "UTF-8")}"
-
-                    val genReqFsl = Request.Builder()
-                        .url(genUrl)
-                        .post(rawGenBodyFsl.toRequestBody(formMediaType))
-                        .header("User-Agent", userAgent)
-                        .header("Referer", currentUrl)
-                        .header("Origin", finalOrigin)
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                        .build()
-
-                    var genLinkResponseFsl = ""
-                    sessionClient.newCall(genReqFsl).execute().use { resp ->
-                        genLinkResponseFsl = resp.body?.string().orEmpty()
-                    }
-
-                    if (genLinkResponseFsl.isNotBlank()) {
-                        try {
-                            val fbJson = JSONObject(genLinkResponseFsl)
-
-                            val newTokenB = fbJson.optString("new_token_b", "").trim()
-                            if (newTokenB.isNotEmpty()) {
-                                tokenB = newTokenB
-                            }
-
-                            var fbTempUrl = fbJson.optString("url", "")
-                                .ifEmpty { fbJson.optString("download_url", "") }
-                                .ifEmpty { fbJson.optString("link", "") }
-                                .trim()
-
-                            if (fbTempUrl.contains("/fslv2/")) {
-                                val hash = fbTempUrl.substringAfterLast("/")
-                                val fbWorkerUrl = "$finalOrigin/fslv2-worker.php?t=$hash&poll=1"
-
-                                val fbWorkerReq = Request.Builder()
-                                    .url(fbWorkerUrl)
-                                    .header("User-Agent", userAgent)
-                                    .header("Referer", currentUrl)
-                                    .header("Origin", finalOrigin)
-                                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                                    .header("X-Requested-With", "XMLHttpRequest")
-                                    .build()
-
-                                var fbWorkerResp = ""
-                                sessionClient.newCall(fbWorkerReq).execute().use { wResp ->
-                                    fbWorkerResp = wResp.body?.string().orEmpty()
-                                }
-
-                                if (fbWorkerResp.isNotBlank()) {
-                                    val fwJson = JSONObject(fbWorkerResp)
-                                    if (fwJson.optBoolean("ready", false) || fwJson.has("url")) {
-                                        fbTempUrl = fwJson.optString("url", fbTempUrl).trim()
-                                    }
-                                }
-                            }
-
-                            if (fbTempUrl.startsWith("http")) {
-                                finalDirectVideoUrl = fbTempUrl
-                                isFslSuccess = true
-                            }
-                        } catch (_: Throwable) {}
-                    }
-                }
-
-                // ==========================================
-                // ধাপ ৪: ফলব্যাক মেথড -> r2 (CloudFiles)
-                // ==========================================
-                if (!isFslSuccess || finalDirectVideoUrl.isEmpty()) {
-                    val cfTokenR2 = requestTurnstileToken(siteKey, finalOrigin)
-                    if (cfTokenR2.isNullOrBlank()) {
-                        return@withLock null
-                    }
-
+                val cfTokenR2 = requestTurnstileToken(siteKey, finalOrigin)
+                if (!cfTokenR2.isNullOrBlank()) {
                     val rawGenBodyR2 = "type=r2" +
                             "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
                             "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
@@ -550,6 +473,11 @@ class HDWebMoviesProvider : MainAPI {
                     if (genLinkResponseR2.isNotBlank()) {
                         try {
                             val jsonR2 = JSONObject(genLinkResponseR2)
+
+                            val newTokenB = jsonR2.optString("new_token_b", "").trim()
+                            if (newTokenB.isNotEmpty()) {
+                                tokenB = newTokenB
+                            }
 
                             var tempUrl = jsonR2.optString("url", "")
                                 .ifEmpty { jsonR2.optString("download_url", "") }
@@ -584,6 +512,74 @@ class HDWebMoviesProvider : MainAPI {
 
                             if (tempUrl.startsWith("http")) {
                                 finalDirectVideoUrl = tempUrl
+                                isR2Success = true
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+
+                // ==========================================
+                // ধাপ ৪: ফলব্যাক মেথড -> fslv2new (FSLv2)
+                // ==========================================
+                if (!isR2Success || finalDirectVideoUrl.isEmpty()) {
+                    val cfTokenFsl = requestTurnstileToken(siteKey, finalOrigin)
+                    if (cfTokenFsl.isNullOrBlank()) {
+                        return@withLock null
+                    }
+
+                    val rawGenBodyFsl = "type=fslv2new" +
+                            "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
+                            "&token_b=${URLEncoder.encode(tokenB, "UTF-8")}" +
+                            "&cf_turnstile_response=${URLEncoder.encode(cfTokenFsl, "UTF-8")}"
+
+                    val genReqFsl = Request.Builder()
+                        .url(genUrl)
+                        .post(rawGenBodyFsl.toRequestBody(formMediaType))
+                        .header("User-Agent", userAgent)
+                        .header("Referer", currentUrl)
+                        .header("Origin", finalOrigin)
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                        .build()
+
+                    var genLinkResponseFsl = ""
+                    sessionClient.newCall(genReqFsl).execute().use { resp ->
+                        genLinkResponseFsl = resp.body?.string().orEmpty()
+                    }
+
+                    if (genLinkResponseFsl.isNotBlank()) {
+                        try {
+                            val fbJson = JSONObject(genLinkResponseFsl)
+                            var fbTempUrl = fbJson.optString("url", "").trim()
+
+                            if (fbTempUrl.contains("/fslv2/")) {
+                                val hash = fbTempUrl.substringAfterLast("/")
+                                val fbWorkerUrl = "$finalOrigin/fslv2-worker.php?t=$hash&poll=1"
+
+                                val fbWorkerReq = Request.Builder()
+                                    .url(fbWorkerUrl)
+                                    .header("User-Agent", userAgent)
+                                    .header("Referer", currentUrl)
+                                    .header("Origin", finalOrigin)
+                                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                                    .header("X-Requested-With", "XMLHttpRequest")
+                                    .build()
+
+                                var fbWorkerResp = ""
+                                sessionClient.newCall(fbWorkerReq).execute().use { wResp ->
+                                    fbWorkerResp = wResp.body?.string().orEmpty()
+                                }
+
+                                if (fbWorkerResp.isNotBlank()) {
+                                    val fwJson = JSONObject(fbWorkerResp)
+                                    if (fwJson.optBoolean("ready", false) || fwJson.has("url")) {
+                                        fbTempUrl = fwJson.optString("url", fbTempUrl).trim()
+                                    }
+                                }
+                            }
+
+                            if (fbTempUrl.startsWith("http")) {
+                                finalDirectVideoUrl = fbTempUrl
                             }
                         } catch (_: Throwable) {}
                     }
