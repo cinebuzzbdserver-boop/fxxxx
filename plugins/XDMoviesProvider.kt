@@ -62,9 +62,10 @@ class XDMoviesProvider : MainAPI {
 
     private fun fixUrl(url: String, base: String): String {
         val trimmed = url.trim()
-        if (trimmed.isEmpty()) return ""
+        if (trimmed.isEmpty() || trimmed.contains("placeholder.com", ignoreCase = true)) return ""
+
         val resolved = when {
-            trimmed.startsWith("http") -> trimmed
+            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
             trimmed.startsWith("//") -> "https:$trimmed"
             trimmed.startsWith("/") -> "$base$trimmed"
             else -> "$base/$trimmed"
@@ -77,6 +78,29 @@ class XDMoviesProvider : MainAPI {
         }
     }
 
+    private fun extractCardImage(cardHtml: String, base: String): String {
+        // ১. সরাসরি TMDB পোস্টারের পাথ ও ফাইলনেম টার্গেট করবে (w500 বা অন্য সাইজ যাই থাকুক)
+        val tmdbRegex = Regex("""(?:https?://image\.tmdb\.org)?/t/p/(?:[a-zA-Z0-9_]+/)?([a-zA-Z0-9_-]+\.(?:jpg|jpeg|png|webp))""", RegexOption.IGNORE_CASE)
+        val tmdbMatch = tmdbRegex.find(cardHtml)
+        if (tmdbMatch != null) {
+            val fileName = tmdbMatch.groupValues[1].trim()
+            return "https://image.tmdb.org/t/p/original/$fileName"
+        }
+
+        // ২. img ট্যাগের স্পেসিফিক src অ্যাট্রিবিউট এক্সট্র্যাক্ট করবে (onerror সম্পূর্ণ বাইপাস করে)
+        val imgSrcRegex = Regex("""<img\b[^>]*?\bsrc=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val srcMatch = imgSrcRegex.find(cardHtml)?.groupValues?.get(1)?.trim().orEmpty()
+
+        if (srcMatch.isNotEmpty() &&
+            !srcMatch.contains("placeholder.com", ignoreCase = true) &&
+            !srcMatch.startsWith("data:image", ignoreCase = true)
+        ) {
+            return fixUrl(srcMatch, base)
+        }
+
+        return ""
+    }
+
     private fun parseMovieGrid(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
@@ -85,7 +109,6 @@ class XDMoviesProvider : MainAPI {
             RegexOption.IGNORE_CASE
         )
         val titleRegex = Regex("""<h3[^>]*>([\s\S]*?)</h3>""", RegexOption.IGNORE_CASE)
-        val imgRegex = Regex("""<img[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
         val yearRegex = Regex("""<p[^>]*>(\d{4})</p>""", RegexOption.IGNORE_CASE)
 
         for (match in itemRegex.findAll(html)) {
@@ -93,12 +116,11 @@ class XDMoviesProvider : MainAPI {
             val innerCard = match.groupValues[2]
 
             val rawTitle = titleRegex.find(innerCard)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), "")?.trim().orEmpty()
-            val rawImg = imgRegex.find(innerCard)?.groupValues?.get(1)?.trim().orEmpty()
             val year = yearRegex.find(innerCard)?.groupValues?.get(1)?.trim()
+            val fullImg = extractCardImage(innerCard, base)
 
             if (rawPath.isNotEmpty() && rawTitle.isNotEmpty()) {
                 val fullUrl = fixUrl(rawPath, base)
-                val fullImg = fixUrl(rawImg, base)
                 val displayTitle = if (!year.isNullOrEmpty() && !rawTitle.contains(year)) {
                     "$rawTitle ($year)"
                 } else {
@@ -221,7 +243,6 @@ class XDMoviesProvider : MainAPI {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // pack-card এবং সাধারণ ডাউনলোড কার্ড এক্সট্র্যাক্ট করার জন্য রেজেক্স
         val packBlockRegex = Regex("""<div[^>]*class=["'][^"']*pack-card[^"']*["'][^>]*>([\s\S]*?)</div>\s*</div>""", RegexOption.IGNORE_CASE)
         val packTitleRegex = Regex("""<h4[^>]*class=["'][^"']*pack-title[^"']*["'][^>]*>([\s\S]*?)</h4>""", RegexOption.IGNORE_CASE)
         val sizeBadgeRegex = Regex("""<span[^>]*class=["'][^"']*size-badge[^"']*["'][^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE)
@@ -249,7 +270,6 @@ class XDMoviesProvider : MainAPI {
             }
         }
 
-        // কোনো পেজে যদি pack-card ক্লাস না থেকে সরাসরি download-button থাকে, তার জন্য ফলব্যাক
         if (rawLinks.isEmpty()) {
             val fallbackRegex = Regex("""<a\s+[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*download-button[^"']*["'][^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
             for (match in fallbackRegex.findAll(html)) {
@@ -274,7 +294,6 @@ class XDMoviesProvider : MainAPI {
 
         try {
             val base = getBaseUrl()
-            // রিডাইরেক্ট ফলো করে সরাসরি ফাইল বা স্ট্রিমিং লিঙ্ক রিটার্ন
             StreamItem(
                 quality = "Direct Stream",
                 streamUrl = generateUrl.trim(),
