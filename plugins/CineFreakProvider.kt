@@ -302,7 +302,7 @@ class CineFreakProvider : MainAPI {
                 val targetUri = URI(cleanUrl)
                 val domainOrigin = "${targetUri.scheme}://${targetUri.host}"
 
-                // ধাপ ১: গেটওয়ে পেজ থেকে সাইটকি ও সেশন কুকি সংগ্রহ
+                // ধাপ ১: গেটওয়ে পেজ ফেচ করে সাইটকি নেওয়া
                 val initReq = Request.Builder()
                     .url(cleanUrl)
                     .header("User-Agent", userAgent)
@@ -318,7 +318,7 @@ class CineFreakProvider : MainAPI {
 
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
-                // ধাপ ২: /n এ রিকোয়েস্ট পাঠিয়ে "n" (bc) টোকেন সংগ্রহ
+                // ধাপ ২: /n কল করে n (bc) টোকেন সংগ্রহ
                 val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
                 val nReq = Request.Builder()
                     .url(nUrl)
@@ -341,11 +341,11 @@ class CineFreakProvider : MainAPI {
 
                 if (nToken.isEmpty()) return@withLock null
 
-                // ধাপ ৩: Cloudflare Turnstile সলভ করা
+                // ধাপ ৩: টার্নস্টাইল সলভ
                 val cfToken = requestTurnstileToken(siteKey, domainOrigin)
                 if (cfToken.isNullOrBlank()) return@withLock null
 
-                // ধাপ ৪: /unlock এন্ডপয়েন্টে POST রিকোয়েস্ট ও cf_pass কুকি ক্যাপচার করা
+                // ধাপ ৪: /unlock এন্ডপয়েন্টে রিকোয়েস্ট পাঠিয়ে বাটন ও cf_pass সংগ্রহ
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
                 val unlockBody = "ts=${URLEncoder.encode(cfToken, "UTF-8")}&bc=${URLEncoder.encode(nToken, "UTF-8")}"
@@ -364,12 +364,11 @@ class CineFreakProvider : MainAPI {
                 var cfPassValue = ""
 
                 sessionClient.newCall(unlockReq).execute().use { resp ->
-                    // Set-Cookie রেসপন্স হেডার থেকে cf_pass ফিল্টার করা
-                    val setCookieHeaders = resp.headers("Set-Cookie")
-                    for (header in setCookieHeaders) {
-                        val cookieMatcher = Regex("""cf_pass=([^;]+)""").find(header)
-                        if (cookieMatcher != null) {
-                            cfPassValue = cookieMatcher.groupValues[1].trim()
+                    // Set-Cookie রেসপন্স হেডার থেকে cf_pass ফিল্টার
+                    for (header in resp.headers("Set-Cookie")) {
+                        val matcher = Regex("""cf_pass=([^;]+)""").find(header)
+                        if (matcher != null) {
+                            cfPassValue = matcher.groupValues[1].trim()
                             break
                         }
                     }
@@ -388,7 +387,7 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
-                // CookieJar মেমোরি স্টোর চেক করা যদি হেডারে না পাওয়া যায়
+                // যদি CookieJar মেমোরি স্টোরে সেভ হয়ে থাকে
                 if (cfPassValue.isEmpty()) {
                     val currentHost = URI(cleanUrl).host
                     val storedCookies = freshCookieStore[currentHost] ?: emptyList()
@@ -397,34 +396,37 @@ class CineFreakProvider : MainAPI {
 
                 if (unlockHtml.isBlank()) return@withLock null
 
-                // ধাপ ৫: ফেক/হিডেন লিঙ্ক বাদ দিয়ে আসল FAST CLOUD [FSL] বাটনটি বের করা
-                // হিডেন/ফেক ট্যাগে tabindex="-1" থাকে, যা নেতিবাচক লুকেহেড (?!...) দিয়ে বাদ দেওয়া হয়েছে
-                val validFslRegex = Regex(
-                    """<a\s+(?![^>]*tabindex\s*=\s*['"]-1['"])[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
+                // ধাপ ৫: বাটনগুলো পার্স করা এবং ফেক লিঙ্ক বাদ দেওয়া
+                // aria-hidden="true" ব্লকটি স্ক্র্যাপ করার আগে মূল HTML থেকে সম্পূর্ণ ডিলিট করে নেওয়া
+                val cleanedHtml = unlockHtml.replace(
+                    Regex("""<div[^>]*aria-hidden\s*=\s*['"]true['"][^>]*>[\s\S]*?</div>""", RegexOption.IGNORE_CASE),
+                    ""
+                )
+
+                val fslRegex = Regex(
+                    """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
                     RegexOption.IGNORE_CASE
                 )
-                
-                var fslPath = validFslRegex.find(unlockHtml)?.groupValues?.get(1)?.trim().orEmpty()
 
-                // ব্যাকআপ লজিক: যদি কোনো কারণে tabindex অ্যাট্রিবিউট মিস হয়, তবে সব ম্যাচ বের করে প্রথম ডামি লিংক বাদ দেওয়া
-                if (fslPath.isEmpty()) {
-                    val allFslRegex = Regex(
-                        """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
-                        RegexOption.IGNORE_CASE
-                    )
-                    val allMatches = allFslRegex.findAll(unlockHtml).toList()
-                    if (allMatches.size >= 2) {
-                        fslPath = allMatches[1].groupValues[1].trim() // দুই নম্বর (আসল) লিংকটি নেওয়া
-                    } else if (allMatches.isNotEmpty()) {
-                        fslPath = allMatches[0].groupValues[1].trim()
+                // ক্লিন করা HTML থেকে দৃশ্যমান আসল FSL বাটন নেওয়া
+                var targetCandidatePath = fslRegex.find(cleanedHtml)?.groupValues?.get(1)?.trim().orEmpty()
+
+                // ব্যাকআপ লজিক: যদি কোনো কারণে কন্টেইনার ডিলিট না হয়, সব ম্যাচিং লিঙ্ক এনে প্রসেস করা
+                val candidateList = mutableListOf<String>()
+                if (targetCandidatePath.isNotEmpty()) {
+                    candidateList.add(targetCandidatePath)
+                }
+
+                for (m in fslRegex.findAll(unlockHtml)) {
+                    val p = m.groupValues[1].trim()
+                    if (p.isNotEmpty() && !candidateList.contains(p)) {
+                        candidateList.add(p)
                     }
                 }
 
-                if (fslPath.isEmpty()) return@withLock null
+                if (candidateList.isEmpty()) return@withLock null
 
-                val finalDownloadTarget = fixUrl(fslPath, domainOrigin)
-
-                // ধাপ ৬: cf_pass কুকিসহ cURL-এর মতো রিকোয়েস্ট পাঠিয়ে 3xx Location হেডার বের করা
+                // ধাপ ৬: রিডাইরেকশন টেস্ট করে নিশ্চিত হওয়া কোনটি আসল ভিডিও লিঙ্ক
                 val noRedirectClient = sessionClient.newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
@@ -435,9 +437,9 @@ class CineFreakProvider : MainAPI {
                     cookieHeaderBuilder.append("cf_pass=$cfPassValue; ")
                 }
 
-                val targetHttpUrl = finalDownloadTarget.toHttpUrlOrNull()
-                if (targetHttpUrl != null) {
-                    val jarCookies = scopedCookieJar.loadForRequest(targetHttpUrl)
+                val testHttpUrl = fixUrl(candidateList.first(), domainOrigin).toHttpUrlOrNull()
+                if (testHttpUrl != null) {
+                    val jarCookies = scopedCookieJar.loadForRequest(testHttpUrl)
                     for (c in jarCookies) {
                         if (c.name != "cf_pass") {
                             cookieHeaderBuilder.append("${c.name}=${c.value}; ")
@@ -446,27 +448,50 @@ class CineFreakProvider : MainAPI {
                 }
                 val resolvedCookieStr = cookieHeaderBuilder.toString().trimEnd(';', ' ')
 
-                val directReqBuilder = Request.Builder()
-                    .url(finalDownloadTarget)
-                    .header("User-Agent", userAgent)
-                    .header("Referer", cleanUrl)
+                var resolvedStreamUrl = ""
 
-                if (resolvedCookieStr.isNotBlank()) {
-                    directReqBuilder.header("Cookie", resolvedCookieStr)
-                }
+                // প্রতিটি সম্ভাব্য বাটন যাচাই করে ফেক ফিল্টার করা
+                for (path in candidateList) {
+                    val fullPath = fixUrl(path, domainOrigin)
+                    val directReqBuilder = Request.Builder()
+                        .url(fullPath)
+                        .header("User-Agent", userAgent)
+                        .header("Referer", cleanUrl)
 
-                var resolvedStreamUrl = finalDownloadTarget
-
-                noRedirectClient.newCall(directReqBuilder.build()).execute().use { finalResp ->
-                    val statusCode = finalResp.code
-                    // ৩xx রিডাইরেকশনের Location হেডার এক্সট্র্যাক্ট করা
-                    if (statusCode in 300..399) {
-                        val redirectLocation = finalResp.header("Location")
-                        if (!redirectLocation.isNullOrBlank()) {
-                            resolvedStreamUrl = fixUrl(redirectLocation, domainOrigin)
-                        }
+                    if (resolvedCookieStr.isNotBlank()) {
+                        directReqBuilder.header("Cookie", resolvedCookieStr)
                     }
+
+                    try {
+                        noRedirectClient.newCall(directReqBuilder.build()).execute().use { resp ->
+                            val statusCode = resp.code
+                            if (statusCode in 300..399) {
+                                val location = resp.header("Location").orEmpty().trim()
+                                if (location.isNotEmpty()) {
+                                    val resolvedLoc = fixUrl(location, domainOrigin)
+                                    // ফেক লিঙ্কের ডোমেইন বা ফাইলনেম থাকলে বাদ দেওয়া
+                                    val isFakeLink = resolvedLoc.contains("pub-10da0f41c8ea4953ac9ba4a3ec208325.r2.dev", ignoreCase = true) ||
+                                            resolvedLoc.contains("Watch%20Online", ignoreCase = true) ||
+                                            resolvedLoc.contains("Watch Online", ignoreCase = true)
+
+                                    if (!isFakeLink) {
+                                        resolvedStreamUrl = resolvedLoc
+                                        return@use // আসল লিঙ্ক পাওয়া গেছে
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Throwable) {}
+
+                    if (resolvedStreamUrl.isNotEmpty()) break
                 }
+
+                // যদি কোনো ফিল্টারেই না আসে, তালিকার শেষ লিঙ্কটিকে ব্যাকআপ রাখা
+                if (resolvedStreamUrl.isEmpty() && candidateList.isNotEmpty()) {
+                    resolvedStreamUrl = fixUrl(candidateList.last(), domainOrigin)
+                }
+
+                if (resolvedStreamUrl.isEmpty()) return@withLock null
 
                 val finalHeaders = mutableMapOf(
                     "User-Agent" to userAgent,
