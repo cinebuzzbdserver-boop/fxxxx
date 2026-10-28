@@ -302,7 +302,7 @@ class CineFreakProvider : MainAPI {
                 val targetUri = URI(cleanUrl)
                 val domainOrigin = "${targetUri.scheme}://${targetUri.host}"
 
-                // ধাপ ১: আসল গেটওয়ে পেজে রিকোয়েস্ট পাঠিয়ে সাইটকি ও প্রাথমিক কুকি সংগ্রহ
+                // ধাপ ১: গেটওয়ে পেজ থেকে সাইটকি ও সেশন কুকি সংগ্রহ
                 val initReq = Request.Builder()
                     .url(cleanUrl)
                     .header("User-Agent", userAgent)
@@ -318,7 +318,7 @@ class CineFreakProvider : MainAPI {
 
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
-                // ধাপ ২: /n এ GET রিকোয়েস্ট পাঠিয়ে "n" (bc) টোকেন সংগ্রহ
+                // ধাপ ২: /n এ রিকোয়েস্ট পাঠিয়ে "n" (bc) টোকেন সংগ্রহ
                 val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
                 val nReq = Request.Builder()
                     .url(nUrl)
@@ -345,7 +345,7 @@ class CineFreakProvider : MainAPI {
                 val cfToken = requestTurnstileToken(siteKey, domainOrigin)
                 if (cfToken.isNullOrBlank()) return@withLock null
 
-                // ধাপ ৪: /unlock এন্ডপয়েন্টে POST রিকোয়েস্ট পাঠিয়ে বাটন সম্বলিত HTML ও cf_pass কুকি সংগ্রহ
+                // ধাপ ৪: /unlock এন্ডপয়েন্টে POST রিকোয়েস্ট ও cf_pass কুকি ক্যাপচার করা
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
                 val unlockBody = "ts=${URLEncoder.encode(cfToken, "UTF-8")}&bc=${URLEncoder.encode(nToken, "UTF-8")}"
@@ -381,7 +381,6 @@ class CineFreakProvider : MainAPI {
                             if (json.optBoolean("ok", false)) {
                                 unlockHtml = json.optString("html", "")
                             }
-                            // যদি সার্ভার হেডারের বদলে JSON এর ভেতরে cf_pass পাঠায়
                             if (cfPassValue.isEmpty() && json.has("cf_pass")) {
                                 cfPassValue = json.optString("cf_pass", "").trim()
                             }
@@ -389,7 +388,7 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
-                // যদি রেসপন্স হেডারে সরাসরি না মিলে তবে CookieJar মেমোরি স্টোর চেক করা
+                // CookieJar মেমোরি স্টোর চেক করা যদি হেডারে না পাওয়া যায়
                 if (cfPassValue.isEmpty()) {
                     val currentHost = URI(cleanUrl).host
                     val storedCookies = freshCookieStore[currentHost] ?: emptyList()
@@ -398,25 +397,34 @@ class CineFreakProvider : MainAPI {
 
                 if (unlockHtml.isBlank()) return@withLock null
 
-                // ধাপ ৫: দুই নম্বর 'FAST CLOUD [FSL]' বাটনটি খুঁজে বের করা
-                val fslRegex = Regex(
-                    """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
+                // ধাপ ৫: ফেক/হিডেন লিঙ্ক বাদ দিয়ে আসল FAST CLOUD [FSL] বাটনটি বের করা
+                // হিডেন/ফেক ট্যাগে tabindex="-1" থাকে, যা নেতিবাচক লুকেহেড (?!...) দিয়ে বাদ দেওয়া হয়েছে
+                val validFslRegex = Regex(
+                    """<a\s+(?![^>]*tabindex\s*=\s*['"]-1['"])[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
                     RegexOption.IGNORE_CASE
                 )
-                val matches = fslRegex.findAll(unlockHtml).toList()
-                val fslPath = if (matches.size >= 2) {
-                    matches[1].groupValues[1].trim()
-                } else if (matches.isNotEmpty()) {
-                    matches[0].groupValues[1].trim()
-                } else {
-                    ""
+                
+                var fslPath = validFslRegex.find(unlockHtml)?.groupValues?.get(1)?.trim().orEmpty()
+
+                // ব্যাকআপ লজিক: যদি কোনো কারণে tabindex অ্যাট্রিবিউট মিস হয়, তবে সব ম্যাচ বের করে প্রথম ডামি লিংক বাদ দেওয়া
+                if (fslPath.isEmpty()) {
+                    val allFslRegex = Regex(
+                        """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
+                        RegexOption.IGNORE_CASE
+                    )
+                    val allMatches = allFslRegex.findAll(unlockHtml).toList()
+                    if (allMatches.size >= 2) {
+                        fslPath = allMatches[1].groupValues[1].trim() // দুই নম্বর (আসল) লিংকটি নেওয়া
+                    } else if (allMatches.isNotEmpty()) {
+                        fslPath = allMatches[0].groupValues[1].trim()
+                    }
                 }
 
                 if (fslPath.isEmpty()) return@withLock null
 
                 val finalDownloadTarget = fixUrl(fslPath, domainOrigin)
 
-                // ধাপ ৬: রিডাইরেকশন অটো-ফলো বন্ধ রেখে cf_pass কুকিসহ Location হেডার বের করা
+                // ধাপ ৬: cf_pass কুকিসহ cURL-এর মতো রিকোয়েস্ট পাঠিয়ে 3xx Location হেডার বের করা
                 val noRedirectClient = sessionClient.newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
@@ -451,7 +459,7 @@ class CineFreakProvider : MainAPI {
 
                 noRedirectClient.newCall(directReqBuilder.build()).execute().use { finalResp ->
                     val statusCode = finalResp.code
-                    // 3xx রিডাইরেকশন কোড চেক করে Location হেডার এক্সট্র্যাক্ট করা
+                    // ৩xx রিডাইরেকশনের Location হেডার এক্সট্র্যাক্ট করা
                     if (statusCode in 300..399) {
                         val redirectLocation = finalResp.header("Location")
                         if (!redirectLocation.isNullOrBlank()) {
