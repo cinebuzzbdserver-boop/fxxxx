@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -92,7 +93,6 @@ class CineFreakProvider : MainAPI {
 
     private fun parseMainPageItems(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
-        // movie-card লিঙ্ক এবং এর অভ্যন্তরীণ কন্টেন্ট পার্স করার রেজেক্স
         val cardRegex = Regex("""<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*movie-card[^"]*"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
         val titleRegex = Regex("""<h3[^>]*class="[^"]*movie-card-title[^"]*"[^>]*>([\s\S]*?)</h3>""", RegexOption.IGNORE_CASE)
         val imgRegex = Regex("""<img[^>]+src="([^"]+)"""", RegexOption.IGNORE_CASE)
@@ -181,12 +181,10 @@ class CineFreakProvider : MainAPI {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // টাইটেল ব্লক এবং ডাউনলোড কন্টেইনার আলাদা করে ধরা
         val sectionRegex = Regex(
             """<h4\s+class="movie-title"[^>]*>([\s\S]*?)</h4>[\s\S]*?<div\s+class="dlbtn-container"[^>]*>([\s\S]*?)</div>""",
             RegexOption.IGNORE_CASE
         )
-        // শুধুমাত্র dlbtn-download বাটন ফিল্টার করা
         val downloadBtnRegex = Regex(
             """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*dlbtn-download[^"]*"[^>]*>""",
             RegexOption.IGNORE_CASE
@@ -206,7 +204,6 @@ class CineFreakProvider : MainAPI {
             }
         }
 
-        // ফলব্যাক: যদি h4 স্ট্রাকচার ছাড়া সরাসরি বাটন থাকে
         if (rawLinks.isEmpty()) {
             val directDlRegex = Regex(
                 """<a\s+[^>]*href="(https?://[^"]*cinecloud\.[^/]+/f/[^"]+)"[^>]*class="[^"]*dlbtn-download[^"]*"[^>]*>""",
@@ -292,7 +289,6 @@ class CineFreakProvider : MainAPI {
                 }
             }
 
-            // সেশনের কুকি সংরক্ষণকারী OkHttpClient
             val sessionClient = OkHttpClient.Builder()
                 .cookieJar(scopedCookieJar)
                 .connectTimeout(30, TimeUnit.SECONDS)
@@ -306,7 +302,7 @@ class CineFreakProvider : MainAPI {
                 val targetUri = URI(cleanUrl)
                 val domainOrigin = "${targetUri.scheme}://${targetUri.host}"
 
-                // ধাপ ১: আসল গেটওয়ে পেজে রিকোয়েস্ট পাঠিয়ে সাইটকি ও প্রাথমিক কুকি (ci_session ইত্যাদি) সংগ্রহ
+                // ধাপ ১: আসল গেটওয়ে পেজে রিকোয়েস্ট পাঠিয়ে সাইটকি ও প্রাথমিক কুকি সংগ্রহ
                 val initReq = Request.Builder()
                     .url(cleanUrl)
                     .header("User-Agent", userAgent)
@@ -379,7 +375,7 @@ class CineFreakProvider : MainAPI {
 
                 if (unlockHtml.isBlank()) return@withLock null
 
-                // ধাপ ৫: দুই নম্বর 'FAST CLOUD [FSL]' বাটনটি খুঁজে বের করা (প্রথম হিডেন বাটন ইগনোর)
+                // ধাপ ৫: দুই নম্বর 'FAST CLOUD [FSL]' বাটনটি খুঁজে বের করা
                 val fslRegex = Regex(
                     """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
                     RegexOption.IGNORE_CASE
@@ -398,7 +394,6 @@ class CineFreakProvider : MainAPI {
                 val finalDownloadTarget = fixUrl(fslPath, domainOrigin)
 
                 // ধাপ ৬: ফাইনাল রিডাইরেকশন ট্র্যাক করা এবং আসল মিডিয়া লিঙ্ক বের করা
-                // কোনো কোনো সার্ভারে ৩xx রিডাইরেক্টে ডিরেক্ট ভিডিও ফাইল আসে, তাই হেড/গেট পাঠিয়ে রিডাইরেক্ট ফলো করা হচ্ছে
                 val finalRedirectClient = sessionClient.newBuilder()
                     .followRedirects(true)
                     .followSslRedirects(true)
@@ -415,9 +410,16 @@ class CineFreakProvider : MainAPI {
                     resolvedStreamUrl = finalResp.request.url.toString()
                 }
 
-                // সেশনের বর্তমান সব কুকি হেডার আকারে বানিয়ে দেওয়া
-                val cookies = scopedCookieJar.loadForRequest(HttpUrl.get(URI(resolvedStreamUrl)))
-                val cookieHeaderValue = cookies.joinToString("; ") { "${it.name}=${it.value}" }
+                // টাইপ-সেফ উপায়ে HttpUrl পার্স করা যাতে নাল বা সিনট্যাক্স এরর না হয়
+                val targetHttpUrl = resolvedStreamUrl.toHttpUrlOrNull()
+                    ?: cleanUrl.toHttpUrlOrNull()
+
+                val cookieHeaderValue = if (targetHttpUrl != null) {
+                    val cookies = scopedCookieJar.loadForRequest(targetHttpUrl)
+                    cookies.joinToString("; ") { "${it.name}=${it.value}" }
+                } else {
+                    ""
+                }
 
                 val headers = mutableMapOf(
                     "User-Agent" to userAgent,
