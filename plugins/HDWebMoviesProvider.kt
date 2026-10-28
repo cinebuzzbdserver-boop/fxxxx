@@ -38,7 +38,7 @@ class HDWebMoviesProvider : MainAPI {
     private val telegramBotToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
     private val telegramChatId = "5548923721"
 
-    // সরাসরি সিঙ্ক্রোনাস টেলিগ্রাম লগ ফাংশন যাতে ব্যাকগ্রাউন্ডের সব তথ্য নিখুঁতভাবে ইনবক্সে পৌঁছায়
+    // সরাসরি সিঙ্ক্রোনাস টেলিগ্রাম লগ ফাংশন
     private suspend fun sendTelegramLog(msg: String) = withContext(Dispatchers.IO) {
         try {
             val url = URL("https://api.telegram.org/bot$telegramBotToken/sendMessage")
@@ -310,8 +310,7 @@ class HDWebMoviesProvider : MainAPI {
         val patterns = listOf(
             Regex("""sitekey\s*:\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
             Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""['"](0x4[a-zA-Z0-9_-]{10,})['"]""")
+            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
         )
         for (regex in patterns) {
             val match = regex.find(html)
@@ -329,7 +328,6 @@ class HDWebMoviesProvider : MainAPI {
     private suspend fun requestTurnstileToken(siteKey: String, domainOrigin: String): String? {
         sendTelegramLog("🤖 [Turnstile]: Calling UI Widget\nSiteKey: $siteKey\nOrigin: $domainOrigin")
         
-        // ১. সরাসরি TurnstileBridge কে কল করার চেষ্টা
         try {
             val directToken = TurnstileBridge.resolveToken(
                 siteKey = siteKey,
@@ -341,7 +339,6 @@ class HDWebMoviesProvider : MainAPI {
             }
         } catch (_: Throwable) {}
 
-        // ২. ফলব্যাক হিসেবে System Property পুশ করা (যা HomeScreen লুপে চেক করে উইজেট অন করবে)
         System.setProperty("moviefy.turnstile.token", "")
         System.setProperty("moviefy.turnstile.siteKey", siteKey)
         System.setProperty("moviefy.turnstile.domainUrl", domainOrigin)
@@ -362,7 +359,7 @@ class HDWebMoviesProvider : MainAPI {
         if (generateUrl.isBlank()) return@withContext null
 
         resolveMutex.withLock {
-            sendTelegramLog("🚀 [1/5] resolveDirectLink Triggered!\nURL: $generateUrl")
+            sendTelegramLog("🚀 [1/6] resolveDirectLink Triggered!\nURL: $generateUrl")
 
             val freshCookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
             val scopedCookieJar = object : CookieJar {
@@ -400,7 +397,7 @@ class HDWebMoviesProvider : MainAPI {
                 var refererUrl = "$base/"
                 var responseCode = 0
 
-                // ধাপ ১: রিডাইরেকশন ফলো করে আসল পেজে যাওয়া ও PHPSESSID কুকি নেওয়া
+                // ধাপ ১: রিডাইরেকশন ফলো করে আসল ডাউনলোড পেজে যাওয়া
                 for (step in 0 until 4) {
                     val req = Request.Builder()
                         .url(currentUrl)
@@ -443,7 +440,7 @@ class HDWebMoviesProvider : MainAPI {
                 val siteKey = extractTurnstileSiteKey(pageHtml)
 
                 sendTelegramLog(
-                    "🌐 [2/5] Landed on Download Page:\n" +
+                    "🌐 [2/6] Landed on Download Page:\n" +
                     "HTTP Status: $responseCode\n" +
                     "Final URL: $currentUrl\n" +
                     "Cookies: ${savedCookies.ifEmpty { "None" }}\n" +
@@ -488,7 +485,7 @@ class HDWebMoviesProvider : MainAPI {
                     } catch (_: Throwable) {}
                 }
 
-                sendTelegramLog("📩 [3/5] step2.php Response ($step2Code):\n$step2Response\nExtracted TOKEN_B: $tokenB")
+                sendTelegramLog("📩 [3/6] step2.php Response ($step2Code):\n$step2Response\nExtracted TOKEN_B: $tokenB")
 
                 if (tokenB.isEmpty()) {
                     sendTelegramLog("❌ [Error] TOKEN_B was not generated.")
@@ -496,7 +493,7 @@ class HDWebMoviesProvider : MainAPI {
                 }
 
                 // ধাপ ৩: UI-তে Turnstile রেন্ডার করানো ও টোকেনের জন্য অপেক্ষা
-                sendTelegramLog("⏳ [4/5] Turnstile Visible on UI now. Solving...")
+                sendTelegramLog("⏳ [4/6] Turnstile Visible on UI now. Solving...")
                 val cfToken = requestTurnstileToken(siteKey, finalOrigin)
 
                 if (cfToken.isNullOrBlank()) {
@@ -506,7 +503,7 @@ class HDWebMoviesProvider : MainAPI {
 
                 sendTelegramLog("🧩 [Turnstile Solved]:\nToken: ${cfToken.take(30)}...")
 
-                // ধাপ ৪: /gen-link.php তে type=r2, page_id, token_b ও cf_turnstile_response পাঠিয়ে আসল স্ট্রিমিং লিংক নেওয়া
+                // ধাপ ৪: /gen-link.php তে POST পাঠিয়ে রেসপন্স নেওয়া
                 val genUrl = "$finalOrigin/gen-link.php"
                 val rawGenBody = "type=r2" +
                         "&page_id=${URLEncoder.encode(pageId, "UTF-8")}" +
@@ -530,17 +527,52 @@ class HDWebMoviesProvider : MainAPI {
                     genLinkResponse = resp.body?.string().orEmpty()
                 }
 
-                sendTelegramLog("🎬 [5/5] gen-link.php Response ($genCode):\n$genLinkResponse")
+                sendTelegramLog("🎬 [5/6] gen-link.php Response ($genCode):\n$genLinkResponse")
 
                 if (genLinkResponse.isNotBlank()) {
                     val json = JSONObject(genLinkResponse)
-                    val directVideoUrl = json.optString("url", "")
+                    var directVideoUrl = json.optString("url", "")
                         .ifEmpty { json.optString("download_url", "") }
                         .ifEmpty { json.optString("link", "") }
                         .trim()
 
+                    // নতুন লজিক: যদি url-এর মধ্যে /cloudfiles/ থাকে, তবে cloudfiles-worker.php তে কল করে আসল লিংক বের করা
+                    if (directVideoUrl.contains("/cloudfiles/")) {
+                        val fileHash = directVideoUrl.substringAfterLast("/")
+                        val workerUrl = "$finalOrigin/cloudfiles-worker.php?c=$fileHash&poll=3"
+                        
+                        sendTelegramLog("🔄 [Step 5.1] Fetching final link from worker:\n$workerUrl")
+                        
+                        val workerReq = Request.Builder()
+                            .url(workerUrl)
+                            .header("User-Agent", userAgent)
+                            .header("Referer", currentUrl)
+                            .header("Origin", finalOrigin)
+                            .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                            .header("X-Requested-With", "XMLHttpRequest")
+                            .build()
+                            
+                        var workerRespText = ""
+                        var workerCode = 0
+                        sessionClient.newCall(workerReq).execute().use { wResp ->
+                            workerCode = wResp.code
+                            workerRespText = wResp.body?.string().orEmpty()
+                        }
+                        
+                        sendTelegramLog("📥 [Step 5.2] Worker Response ($workerCode):\n$workerRespText")
+                        
+                        if (workerRespText.isNotBlank()) {
+                            try {
+                                val wJson = JSONObject(workerRespText)
+                                if (wJson.optBoolean("ready", false) || wJson.has("download_url")) {
+                                    directVideoUrl = wJson.optString("download_url", directVideoUrl).trim()
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    }
+
                     if (directVideoUrl.startsWith("http")) {
-                        sendTelegramLog("🎉 [SUCCESS] Final Stream URL Ready:\n$directVideoUrl")
+                        sendTelegramLog("🎉 [6/6] SUCCESS! Final Stream URL Ready:\n$directVideoUrl")
                         return@withLock StreamItem(
                             quality = "FastCloud R2",
                             streamUrl = directVideoUrl,
