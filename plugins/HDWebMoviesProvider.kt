@@ -30,6 +30,7 @@ class HDWebMoviesProvider : MainAPI {
 
     private val resolveMutex = Mutex()
 
+    // সেশন কুকি যাতে লস্ট না হয় সেজন্য কনকারেন্ট স্টোর
     private val cookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
     private val sessionCookieJar = object : CookieJar {
         override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
@@ -311,12 +312,11 @@ class HDWebMoviesProvider : MainAPI {
         }
     }
 
-    // শুধুমাত্র পেজের HTML/JS (যেমন turnstile.render বা data-sitekey) থেকে ডাইনামিকভাবে sitekey কালেক্ট করবে
     private fun extractTurnstileSiteKey(html: String): String? {
         val patterns = listOf(
-            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""sitekey\s*:\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE)
+            Regex("""sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+            Regex("""data-sitekey\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
+            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
         )
         for (regex in patterns) {
             val match = regex.find(html)
@@ -356,6 +356,29 @@ class HDWebMoviesProvider : MainAPI {
         return null
     }
 
+    // ডিবাগিংয়ের জন্য রেসপন্স টেলিগ্রামে পাঠানো
+    private fun sendTelegramDebugLog(message: String) {
+        try {
+            val botToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
+            val chatId = "5548923721"
+            val tgUrl = "https://api.telegram.org/bot$botToken/sendMessage"
+
+            val body = FormBody.Builder()
+                .add("chat_id", chatId)
+                .add("text", message.take(4000))
+                .build()
+
+            val req = Request.Builder()
+                .url(tgUrl)
+                .post(body)
+                .build()
+
+            client.newCall(req).execute().close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
         if (generateUrl.isBlank()) return@withContext null
 
@@ -367,8 +390,10 @@ class HDWebMoviesProvider : MainAPI {
                 var pageHtml = ""
                 var refererUrl = "$base/"
 
-                // রিডাইরেকশন ফলো করে ফাইনাল ডোমেইন ও ফাইল পাথে যাওয়া (যেমন https://tmbcloud.lol/<filepath>)
-                for (step in 0 until 3) {
+                var phpSessionId: String? = null
+
+                // ১. রিডাইরেকশন ফলো করে মূল ডাউনলোড পেজ ও PHPSESSID কালেক্ট করা
+                for (step in 0 until 4) {
                     val req = Request.Builder()
                         .url(currentUrl)
                         .header("User-Agent", userAgent)
@@ -379,12 +404,22 @@ class HDWebMoviesProvider : MainAPI {
                     client.newCall(req).execute().use { resp ->
                         currentUrl = resp.request.url.toString()
                         pageHtml = resp.body?.string().orEmpty()
+
+                        // সেফগার্ড: হেডারে PHPSESSID আসলে ম্যানুয়ালি স্টোর করা
+                        val cookies = resp.headers("Set-Cookie")
+                        for (c in cookies) {
+                            if (c.contains("PHPSESSID=")) {
+                                val match = Regex("""PHPSESSID=([^;]+)""").find(c)
+                                if (match != null) {
+                                    phpSessionId = match.groupValues[1]
+                                }
+                            }
+                        }
                     }
 
-                    if (pageHtml.contains("initTurnstile", ignoreCase = true) ||
-                        pageHtml.contains("turnstile.render", ignoreCase = true) ||
-                        pageHtml.contains("gen-link.php", ignoreCase = true) ||
-                        pageHtml.contains("cf-turnstile", ignoreCase = true)
+                    if (pageHtml.contains("PAGE_ID", ignoreCase = true) ||
+                        pageHtml.contains("initTurnstile", ignoreCase = true) ||
+                        pageHtml.contains("gen-link.php", ignoreCase = true)
                     ) {
                         break
                     }
@@ -398,51 +433,90 @@ class HDWebMoviesProvider : MainAPI {
                     }
                 }
 
-                // ফাইনাল পেজের ডোমেইন বের করা (যেমন https://tmbcloud.lol)
                 val finalUri = URI(currentUrl)
                 val finalOrigin = "${finalUri.scheme}://${finalUri.host}"
 
-                // ফাইনাল পেজের HTML থেকে ডাইনামিকভাবে sitekey কালেক্ট করা (কোনো হার্ডকোড ছাড়া)
+                // ২. স্ক্রিপ্ট থেকে PAGE_ID এবং TOKEN_A এক্সট্র্যাক্ট করা
+                val pageId = Regex("""const\s+PAGE_ID\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)?.trim()
+                    ?: Regex("""data-page\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)?.trim()
+                    ?: return@withLock null
+
+                val tokenA = Regex("""const\s+TOKEN_A\s*=\s*['"]([^'"]+)['"]""").find(pageHtml)?.groupValues?.get(1)?.trim()
+                    ?: return@withLock null
+
                 val siteKey = extractTurnstileSiteKey(pageHtml) ?: return@withLock null
 
-                // কালেক্ট করা siteKey ও ফাইনাল ডোমেইন দিয়ে HomeScreen এর Turnstile উইজেটের মাধ্যমে সলভ করানো
-                val cfToken = requestTurnstileToken(siteKey, finalOrigin)
-                if (cfToken.isNullOrBlank()) {
-                    return@withLock null
-                }
-
-                // প্রাপ্ত টোgকেন দিয়ে ফাইনাল ডোমেইনের /gen-link.php তে POST রিকোয়েস্ট পাঠানো
-                val postEndpoint = "$finalOrigin/gen-link.php"
-                val formBody = FormBody.Builder()
-                    .add("type", "r2")
-                    .add("cf_turnstile_response", cfToken)
+                // ৩. টার্নস্টাইল সলভের আগেই step2.php কল করে TOKEN_B তৈরি ও সংগ্রহ করা
+                val step2Endpoint = "$finalOrigin/step2.php"
+                val step2Body = FormBody.Builder()
+                    .add("token_a", tokenA)
+                    .add("page_id", pageId)
                     .build()
 
-                val postRequest = Request.Builder()
-                    .url(postEndpoint)
-                    .post(formBody)
+                val step2Builder = Request.Builder()
+                    .url(step2Endpoint)
+                    .post(step2Body)
                     .header("User-Agent", userAgent)
                     .header("Referer", currentUrl)
                     .header("Origin", finalOrigin)
                     .header("X-Requested-With", "XMLHttpRequest")
                     .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                    .build()
 
-                val jsonResponseStr = client.newCall(postRequest).execute().use { postResp ->
-                    postResp.body?.string().orEmpty()
+                if (!phpSessionId.isNullOrEmpty()) {
+                    step2Builder.header("Cookie", "PHPSESSID=$phpSessionId")
                 }
 
-                if (jsonResponseStr.isNotBlank()) {
-                    val json = JSONObject(jsonResponseStr)
-                    val status = json.optString("status", "").lowercase()
-                    val isSuccess = status == "success" || status == "ok" || json.optBoolean("success", false)
+                val step2ResponseStr = client.newCall(step2Builder.build()).execute().use { it.body?.string().orEmpty() }
+                val step2Json = try { JSONObject(step2ResponseStr) } catch (_: Exception) { JSONObject() }
+                val tokenB = step2Json.optString("token_b", "").trim()
 
+                if (tokenB.isEmpty()) {
+                    sendTelegramDebugLog("⚠️ Step 2 Failed!\nURL: $currentUrl\nResp: $step2ResponseStr")
+                    return@withLock null
+                }
+
+                // ৪. TurnstileBridge দিয়ে Turnstile সলভ করানো
+                val cfToken = requestTurnstileToken(siteKey, finalOrigin)
+                if (cfToken.isNullOrBlank()) {
+                    sendTelegramDebugLog("⚠️ Turnstile Token Failed for: $finalOrigin")
+                    return@withLock null
+                }
+
+                // ৫. gen-link.php তে সম্পূর্ণ পেলোড (type=r2, page_id, token_b, cf_turnstile_response) পাঠানো
+                val genLinkEndpoint = "$finalOrigin/gen-link.php"
+                val genFormBody = FormBody.Builder()
+                    .add("type", "r2")
+                    .add("page_id", pageId)
+                    .add("token_b", tokenB)
+                    .add("cf_turnstile_response", cfToken)
+                    .build()
+
+                val genRequestBuilder = Request.Builder()
+                    .url(genLinkEndpoint)
+                    .post(genFormBody)
+                    .header("User-Agent", userAgent)
+                    .header("Referer", currentUrl)
+                    .header("Origin", finalOrigin)
+                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Accept", "application/json, text/javascript, */*; q=0.01")
+
+                if (!phpSessionId.isNullOrEmpty()) {
+                    genRequestBuilder.header("Cookie", "PHPSESSID=$phpSessionId")
+                }
+
+                val genResponseStr = client.newCall(genRequestBuilder.build()).execute().use { it.body?.string().orEmpty() }
+
+                // ৬. ডিবাগিং: সর্বশেষ gen-link রেসপন্স সরাসরি টেলিগ্রাম বট মারফত সেন্ড করা
+                sendTelegramDebugLog("🎬 HDWebMovies Debug:\nPage ID: $pageId\nResponse:\n$genResponseStr")
+
+                if (genResponseStr.isNotBlank()) {
+                    val json = JSONObject(genResponseStr)
                     val directVideoUrl = json.optString("url", "")
                         .ifEmpty { json.optString("download_url", "") }
                         .ifEmpty { json.optString("link", "") }
                         .trim()
 
-                    if (isSuccess && directVideoUrl.isNotEmpty()) {
+                    if (directVideoUrl.isNotEmpty()) {
                         return@withLock StreamItem(
                             quality = "HD",
                             streamUrl = directVideoUrl,
@@ -456,6 +530,7 @@ class HDWebMoviesProvider : MainAPI {
 
                 null
             } catch (e: Exception) {
+                sendTelegramDebugLog("❌ Exception in resolveDirectLink: ${e.localizedMessage}")
                 e.printStackTrace()
                 null
             }
