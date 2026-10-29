@@ -12,7 +12,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
 import okhttp3.CookieJar
-import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -33,34 +32,12 @@ class CineFreakProvider : MainAPI {
 
     private val resolveMutex = Mutex()
 
-    private val telegramBotToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
-    private val telegramChatId = "5548923721"
-
     private val baseClient = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
-
-    private suspend fun sendTelegramLog(stepTitle: String, details: String) = withContext(Dispatchers.IO) {
-        try {
-            val messageText = buildString {
-                append("<b>[CineCloud Debug] $stepTitle</b>\n\n")
-                append(details)
-            }
-            val formBody = FormBody.Builder()
-                .add("chat_id", telegramChatId)
-                .add("text", messageText)
-                .add("parse_mode", "HTML")
-                .build()
-            val req = Request.Builder()
-                .url("https://api.telegram.org/bot$telegramBotToken/sendMessage")
-                .post(formBody)
-                .build()
-            baseClient.newCall(req).execute().close()
-        } catch (_: Throwable) {}
-    }
 
     private fun getBaseUrl(): String {
         val clean = mainUrl.trim().trimEnd('/')
@@ -69,12 +46,12 @@ class CineFreakProvider : MainAPI {
 
     private suspend fun fetchHtml(url: String, referer: String? = null): String = withContext(Dispatchers.IO) {
         try {
-            val reqBuilder = Request.Builder()
+            val b = Request.Builder()
                 .url(url)
                 .header("User-Agent", userAgent)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            if (!referer.isNullOrEmpty()) reqBuilder.header("Referer", referer)
-            baseClient.newCall(reqBuilder.build()).execute().use { r -> r.body?.string().orEmpty() }
+            if (!referer.isNullOrEmpty()) b.header("Referer", referer)
+            baseClient.newCall(b.build()).execute().use { r -> r.body?.string().orEmpty() }
         } catch (_: Exception) { "" }
     }
 
@@ -140,8 +117,7 @@ class CineFreakProvider : MainAPI {
                 .build()
             val str = baseClient.newCall(req).execute().use { it.body?.string().orEmpty() }
             if (str.isBlank()) return@withContext emptyList()
-            val root = JSONObject(str)
-            val arr = root.optJSONArray("results") ?: return@withContext emptyList()
+            val arr = JSONObject(str).optJSONArray("results") ?: return@withContext emptyList()
             val list = mutableListOf<MovieItem>()
             for (i in 0 until arr.length()) {
                 val item = arr.optJSONObject(i) ?: continue
@@ -217,7 +193,6 @@ class CineFreakProvider : MainAPI {
         return null
     }
 
-    /** Honeypot ডিটেকশন: ৫টি সিগনেচার */
     private fun isHoneypot(html: String): Boolean {
         val l = html.lowercase()
         if (l.contains("aria-hidden=\"true\"") || l.contains("aria-hidden='true'")) return true
@@ -226,17 +201,19 @@ class CineFreakProvider : MainAPI {
         if (l.contains("-10000px")) return true
         if (l.contains("display:none") || l.contains("display: none")) return true
         if (l.contains("visibility:hidden") || l.contains("visibility: hidden")) return true
-        if (l.matches(Regex(""".*\bhidden\b.*"""))) {
-            // শুধু hidden attribute (attr হিসেবে)
-            if (Regex("""\shidden(\s|>|/|$)""", RegexOption.IGNORE_CASE).containsMatchIn(html)) return true
-        }
+        if (Regex("""\shidden(\s|>|/|$)""", RegexOption.IGNORE_CASE).containsMatchIn(html)) return true
         return false
     }
 
-    /** unlock HTML থেকে visible FAST CLOUD লিংক */
+    /**
+     * unlock HTML থেকে দৃশ্যমান লিংক বের করা।
+     * প্রায়োরিটি: FAST CLOUD [FSL] → FAST CLOUD [V2]
+     * যেকোনো একটি পাওয়া গেলেই সেটাই রিটার্ন।
+     */
     private fun extractVisibleLinks(html: String): List<String> {
-        val result = mutableListOf<String>()
-        // পুরো HTML-এ সব <a ...fsl-btn...>FAST CLOUD...</a> স্ক্যান
+        val fsl = mutableListOf<String>()
+        val v2 = mutableListOf<String>()
+
         val anchorRegex = Regex("""<a\s+([^>]*)>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
         for (m in anchorRegex.findAll(html)) {
             val attrs = m.groupValues[1]
@@ -244,12 +221,19 @@ class CineFreakProvider : MainAPI {
             if (!attrs.contains("fsl-btn", ignoreCase = true)) continue
             if (!inner.contains("FAST CLOUD", ignoreCase = true)) continue
             if (isHoneypot(attrs + " " + inner)) continue
-            Regex("""href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-                .find(attrs)?.groupValues?.get(1)?.trim()?.let { h ->
-                    if (h.isNotEmpty() && !result.contains(h)) result.add(h)
-                }
+
+            val href = Regex("""href\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                .find(attrs)?.groupValues?.get(1)?.trim().orEmpty()
+            if (href.isEmpty()) continue
+
+            val isV2 = inner.contains("[V2]", ignoreCase = true)
+            if (isV2) {
+                if (!v2.contains(href)) v2.add(href)
+            } else {
+                if (!fsl.contains(href)) fsl.add(href)
+            }
         }
-        return result
+        return if (fsl.isNotEmpty()) fsl else v2
     }
 
     private fun isFakeRedirect(location: String): Boolean {
@@ -294,31 +278,25 @@ class CineFreakProvider : MainAPI {
                 val cleanUrl = generateUrl.trim()
                 val uri = URI(cleanUrl)
                 val origin = "${uri.scheme}://${uri.host}"
-                val basePath = if (cleanUrl.endsWith("/")) cleanUrl else cleanUrl
+                val basePath = cleanUrl
 
-                sendTelegramLog("1. Target", "<b>URL:</b> <code>$cleanUrl</code>")
-
-                // ── STEP 1: Pre-solve পেজ GET (Turnstile widget সহ) ──
-                val landingHtml = try {
-                    sessionClient.newCall(Request.Builder()
-                        .url(cleanUrl)
-                        .header("User-Agent", userAgent)
-                        .header("Referer", "$origin/")
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-                        .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
-                        .header("Upgrade-Insecure-Requests", "1")
-                        .header("Sec-Fetch-Site", "same-origin")
-                        .header("Sec-Fetch-Mode", "navigate")
-                        .header("Sec-Fetch-Dest", "document")
-                        .header("Sec-Fetch-User", "?1")
-                        .build()).execute().use { it.body?.string().orEmpty() }
-                } catch (e: Throwable) {
-                    sendTelegramLog("STEP1 FAIL", "${e.message}"); return@withLock null
-                }
+                // STEP 1: pre-solve পেজ
+                val landingHtml = sessionClient.newCall(Request.Builder()
+                    .url(cleanUrl)
+                    .header("User-Agent", userAgent)
+                    .header("Referer", "$origin/")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                    .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
+                    .header("Upgrade-Insecure-Requests", "1")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Sec-Fetch-Mode", "navigate")
+                    .header("Sec-Fetch-Dest", "document")
+                    .header("Sec-Fetch-User", "?1")
+                    .build()).execute().use { it.body?.string().orEmpty() }
 
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
-                // ── STEP 2: view-ping (fire-and-forget) ──
+                // STEP 2: view-ping
                 try {
                     sessionClient.newCall(Request.Builder()
                         .url("${basePath}/view-ping")
@@ -332,18 +310,14 @@ class CineFreakProvider : MainAPI {
                         .build()).execute().close()
                 } catch (_: Throwable) {}
 
-                // ── STEP 3: Turnstile solve ──
-                val cfToken = requestTurnstileToken(siteKey, origin)
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramLog("STEP3 FAIL", "Turnstile token null"); return@withLock null
-                }
-                sendTelegramLog("3. Turnstile", "Token OK (${cfToken.take(20)}...)")
+                // STEP 3: Turnstile
+                val cfToken = requestTurnstileToken(siteKey, origin) ?: return@withLock null
 
-                // ── STEP 4: /n (retry 600ms × 2) ──
+                // STEP 4: /n
                 suspend fun getN(): String {
                     repeat(3) { attempt ->
                         try {
-                            val req = Request.Builder()
+                            val body = sessionClient.newCall(Request.Builder()
                                 .url("${basePath}/n")
                                 .header("User-Agent", userAgent)
                                 .header("Referer", cleanUrl)
@@ -353,8 +327,7 @@ class CineFreakProvider : MainAPI {
                                 .header("Sec-Fetch-Site", "same-origin")
                                 .header("Sec-Fetch-Mode", "cors")
                                 .header("Sec-Fetch-Dest", "empty")
-                                .build()
-                            val body = sessionClient.newCall(req).execute().use { it.body?.string().orEmpty() }
+                                .build()).execute().use { it.body?.string().orEmpty() }
                             if (body.isNotBlank()) {
                                 val n = JSONObject(body).optString("n", "").trim()
                                 if (n.isNotEmpty()) return n
@@ -366,21 +339,16 @@ class CineFreakProvider : MainAPI {
                 }
 
                 var nToken = getN()
-                if (nToken.isEmpty()) {
-                    sendTelegramLog("STEP4 FAIL", "'n' token empty"); return@withLock null
-                }
-                sendTelegramLog("4. n Token", "<code>${nToken.take(30)}...</code>")
+                if (nToken.isEmpty()) return@withLock null
 
-                // ── STEP 5: /unlock POST (exactly browser style) ──
+                // STEP 5: /unlock
                 var unlockHtml = ""
-                var rawResp = ""
-                var renonce = false
 
                 fun doUnlock(ts: String, bc: String): Pair<Boolean, Boolean> {
                     return try {
                         val body = "ts=${URLEncoder.encode(ts, "UTF-8")}&bc=${URLEncoder.encode(bc, "UTF-8")}"
                             .toRequestBody("application/x-www-form-urlencoded".toMediaType())
-                        val resp = sessionClient.newCall(Request.Builder()
+                        val raw = sessionClient.newCall(Request.Builder()
                             .url("${basePath}/unlock")
                             .post(body)
                             .header("User-Agent", userAgent)
@@ -392,16 +360,14 @@ class CineFreakProvider : MainAPI {
                             .header("Sec-Fetch-Site", "same-origin")
                             .header("Sec-Fetch-Mode", "cors")
                             .header("Sec-Fetch-Dest", "empty")
-                            .build()).execute()
-                        rawResp = resp.body?.string().orEmpty()
-                        if (rawResp.isBlank()) return Pair(false, false)
-                        val j = JSONObject(rawResp)
+                            .build()).execute().use { it.body?.string().orEmpty() }
+                        if (raw.isBlank()) return Pair(false, false)
+                        val j = JSONObject(raw)
                         if (j.optBoolean("ok", false)) {
                             unlockHtml = j.optString("html", "")
                             Pair(true, false)
                         } else {
-                            renonce = j.optBoolean("renonce", false)
-                            Pair(false, renonce)
+                            Pair(false, j.optBoolean("renonce", false))
                         }
                     } catch (_: Throwable) { Pair(false, false) }
                 }
@@ -415,27 +381,21 @@ class CineFreakProvider : MainAPI {
                         delay(800L)
                         nToken = getN()
                         if (nToken.isEmpty()) break
-                    } else if (!ok) {
-                        break
-                    }
+                    } else if (!ok) break
                     tries++
                 }
 
-                sendTelegramLog("5. Unlock Response", "<b>ok:</b> $success\n<b>Raw:</b>\n<pre>${rawResp.take(2000)}</pre>")
                 if (!success || unlockHtml.isBlank()) return@withLock null
 
-                // ── STEP 6: visible honeypot-free লিংক বের করা ──
+                // STEP 6: visible links (FSL প্রায়োরিটি → V2 ফলব্যাক)
                 val links = extractVisibleLinks(unlockHtml)
-                sendTelegramLog("6. Visible Links", "<b>Count:</b> ${links.size}\n<code>${links.joinToString("\n")}</code>")
                 if (links.isEmpty()) return@withLock null
 
-                // ── STEP 7: 5.5s wait (JS setTimeout(5500)) ──
-                sendTelegramLog("7. Timer Simulation", "Waiting 5,600ms (matches JS)...")
+                // STEP 7: 5.5s wait
                 delay(5600L)
 
-                // ── STEP 8: GET /f/xxx follow redirects (a.click() ব্রাউজার GET) ──
+                // STEP 8: GET /f/xxx follow redirects
                 var finalUrl = ""
-                val logs = StringBuilder()
                 for (href in links) {
                     val full = fixUrl(href, origin)
                     try {
@@ -452,24 +412,15 @@ class CineFreakProvider : MainAPI {
                             .header("Sec-Fetch-User", "?1")
                             .build()).execute().use { resp ->
                                 val reqUrl = resp.request.url.toString()
-                                val code = resp.code
-                                logs.append("<b>→</b> <code>$href</code>\n<b>  final:</b> <code>$reqUrl</code>\n<b>  code:</b> $code\n")
-                                if (!isFakeRedirect(reqUrl) && finalUrl.isEmpty() && resp.isSuccessful) {
+                                if (finalUrl.isEmpty() && resp.isSuccessful && !isFakeRedirect(reqUrl)) {
                                     finalUrl = reqUrl
                                 }
                             }
-                    } catch (e: Throwable) {
-                        logs.append("<b>→</b> <code>$href</code> ERROR: ${e.message}\n")
-                    }
+                    } catch (_: Throwable) {}
+                    if (finalUrl.isNotEmpty()) break
                 }
 
-                sendTelegramLog("8. Final", "$logs\n<b>URL:</b> <code>$finalUrl</code>")
-
-                if (finalUrl.isEmpty()) return@withLock null
-                if (isFakeRedirect(finalUrl)) {
-                    sendTelegramLog("8. FAKE REJECTED", "<code>$finalUrl</code>")
-                    return@withLock null
-                }
+                if (finalUrl.isEmpty() || isFakeRedirect(finalUrl)) return@withLock null
 
                 StreamItem(
                     quality = "FastCloud FSL",
@@ -479,8 +430,7 @@ class CineFreakProvider : MainAPI {
                         "Referer" to "$origin/"
                     )
                 )
-            } catch (t: Throwable) {
-                sendTelegramLog("CRASH", "${t.message}")
+            } catch (_: Throwable) {
                 null
             }
         }
