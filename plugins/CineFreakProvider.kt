@@ -205,11 +205,6 @@ class CineFreakProvider : MainAPI {
         return false
     }
 
-    /**
-     * unlock HTML থেকে দৃশ্যমান লিংক বের করা।
-     * প্রায়োরিটি: FAST CLOUD [FSL] → FAST CLOUD [V2]
-     * যেকোনো একটি পাওয়া গেলেই সেটাই রিটার্ন।
-     */
     private fun extractVisibleLinks(html: String): List<String> {
         val fsl = mutableListOf<String>()
         val v2 = mutableListOf<String>()
@@ -391,8 +386,7 @@ class CineFreakProvider : MainAPI {
                 val links = extractVisibleLinks(unlockHtml)
                 if (links.isEmpty()) return@withLock null
 
-                // STEP 7: 5.5s wait
-                delay(5600L)
+                // STEP 7: ৫.৬ সেকেন্ড delay বাদ — টেস্টিং এর জন্য
 
                 // STEP 8: GET /f/xxx follow redirects
                 var finalUrl = ""
