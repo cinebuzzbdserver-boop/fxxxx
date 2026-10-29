@@ -172,7 +172,6 @@ class CineFreakProvider : MainAPI {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // ── vidzer config (সবার আগে) ──
         val playApi = Regex("""const\s+PLAY_API\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(html)?.groupValues?.get(1)?.replace("\\/", "/")?.trim()
         val tsKey = Regex("""const\s+TS_SITE_KEY\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
@@ -185,7 +184,6 @@ class CineFreakProvider : MainAPI {
             rawLinks.add(Pair("▶ Watch Online (FastCloud Stream)", encoded))
         }
 
-        // ── cinecloud download links ──
         val sectionRegex = Regex(
             """<h4\s+class="movie-title"[^>]*>([\s\S]*?)</h4>[\s\S]*?<div\s+class="dlbtn-container"[^>]*>([\s\S]*?)</div>""",
             RegexOption.IGNORE_CASE
@@ -259,7 +257,11 @@ class CineFreakProvider : MainAPI {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // vidzer ফ্লো — Turnstile আগে, তারপর /play POST
+    // vidzer ফ্লো — ব্রাউজারের হুবহু সিকোয়েন্স
+    //   1. Warm session (post page GET)
+    //   2. POST /play (ts ছাড়া)
+    //   3. 401 + need=ts → Turnstile solve → POST /play (ts সহ)
+    //   4. 200 ready → vidzer URL → qk/apiUrl → cipher → AES-GCM → videoUrl
     // ═══════════════════════════════════════════════════════════
 
     private suspend fun resolveVidzerStream(
@@ -301,7 +303,7 @@ class CineFreakProvider : MainAPI {
                 "<b>postUrl:</b> <code>${esc(postUrlForReferer, 200)}</code>"
             )
 
-            // STEP 1: পোস্ট পেজে GET (session cookies লোড)
+            // ── STEP 1: Warm session (post page GET) ──
             try {
                 val warmHtml = client.newCall(Request.Builder()
                     .url(postUrlForReferer)
@@ -317,60 +319,83 @@ class CineFreakProvider : MainAPI {
                 sendTelegramLog("2. Warm Session FAIL", "${e.message}")
             }
 
-            // STEP 2: Turnstile solve — প্রথমেই
-            sendTelegramLog("3. Turnstile Solving", "sitekey=$tsKey, origin=https://cinefreak.net")
-            val cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
-            if (cfToken.isNullOrBlank()) {
-                sendTelegramLog("3a. TURNSTILE FAILED", "token null/blank")
-                return@withContext null
-            }
-            sendTelegramLog("3b. Turnstile OK", "<code>${esc(cfToken, 200)}</code>")
-
-            // STEP 3: /play POST WITH ts
-            val body = "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}&ts=${URLEncoder.encode(cfToken, "UTF-8")}"
-                .toRequestBody("application/x-www-form-urlencoded".toMediaType())
-
-            var playCode = 0
-            var playResp = ""
-            try {
-                client.newCall(Request.Builder()
-                    .url(playApi)
-                    .post(body)
-                    .header("User-Agent", userAgent)
-                    .header("Referer", postUrlForReferer)
-                    .header("Origin", "https://cinefreak.net")
-                    .header("Accept", "*/*")
-                    .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
-                    .header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .header("Sec-Fetch-Site", "same-origin")
-                    .header("Sec-Fetch-Mode", "cors")
-                    .header("Sec-Fetch-Dest", "empty")
-                    .build()).execute().use {
-                        playCode = it.code
-                        playResp = it.body?.string().orEmpty()
-                    }
-            } catch (e: Throwable) {
-                sendTelegramLog("4. NETWORK FAIL", "${e.message}")
-                return@withContext null
+            // Helper: POST /play
+            suspend fun postPlay(tsToken: String?): Pair<Int, String> {
+                val bodyStr = if (tsToken.isNullOrBlank()) {
+                    "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}"
+                } else {
+                    "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}&ts=${URLEncoder.encode(tsToken, "UTF-8")}"
+                }
+                val body = bodyStr.toRequestBody("application/x-www-form-urlencoded".toMediaType())
+                return try {
+                    client.newCall(Request.Builder()
+                        .url(playApi)
+                        .post(body)
+                        .header("User-Agent", userAgent)
+                        .header("Referer", postUrlForReferer)
+                        .header("Origin", "https://cinefreak.net")
+                        .header("Accept", "*/*")
+                        .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
+                        .header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+                        .header("X-Requested-With", "XMLHttpRequest")
+                        .header("Sec-Fetch-Site", "same-origin")
+                        .header("Sec-Fetch-Mode", "cors")
+                        .header("Sec-Fetch-Dest", "empty")
+                        .build()).execute().use {
+                            Pair(it.code, it.body?.string().orEmpty())
+                        }
+                } catch (e: Throwable) {
+                    sendTelegramLog("POST /play FAIL", "${e.message}")
+                    Pair(0, "")
+                }
             }
 
+            // ── STEP 2: প্রথমে ts ছাড়াই POST ──
+            sendTelegramLog("3. POST /play (no ts)", "First attempt without Turnstile")
+            var (playCode, playResp) = postPlay(null)
             sendTelegramLog(
-                "4. /play RESPONSE",
-                "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1500)}</pre>"
+                "3a. RESPONSE (no ts)",
+                "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1200)}</pre>"
             )
 
             if (playResp.isBlank()) return@withContext null
-            val playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
+            var playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
 
-            if (playCode == 401) {
+            // ── STEP 3: 401 + need=ts হলে Turnstile solve করে retry ──
+            if (playCode == 401 && playJson.optString("need") == "ts") {
+                sendTelegramLog("4. Turnstile Required", "Solving with sitekey=$tsKey, origin=https://cinefreak.net")
+                val cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
+                if (cfToken.isNullOrBlank()) {
+                    sendTelegramLog("4a. TURNSTILE FAILED", "token null/blank")
+                    return@withContext null
+                }
+                sendTelegramLog("4b. Turnstile OK", "<code>${esc(cfToken, 250)}</code>")
+
+                // ব্রাউজারের মতো ছোট natural delay
+                delay(300L)
+
+                sendTelegramLog("4c. POST /play (with ts)", "Retry with Turnstile token")
+                val pair2 = postPlay(cfToken)
+                playCode = pair2.first
+                playResp = pair2.second
                 sendTelegramLog(
-                    "4a. TURNSTILE REJECTED",
-                    "TurnstileBridge টোকেন সার্ভার গ্রহণ করেনি। সেশন/cookie mismatch।"
+                    "4d. RESPONSE (with ts)",
+                    "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1500)}</pre>"
                 )
-                return@withContext null
+
+                if (playResp.isBlank()) return@withContext null
+                playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
+
+                if (playCode == 401) {
+                    sendTelegramLog(
+                        "4e. STILL 401",
+                        "TurnstileBridge টোকেন সার্ভার গ্রহণ করেনি। সেশন/cookie mismatch।"
+                    )
+                    return@withContext null
+                }
             }
 
+            // ── STEP 4: 200 ready → vidzer URL ──
             return@withContext handleVidzerPlayJson(
                 playJson, playApi, tsKey, ep, postUrlForReferer, client, cookieJar
             )
@@ -402,7 +427,7 @@ class CineFreakProvider : MainAPI {
             return@withContext null
         }
 
-        // STEP 4: vidzer /w/{token}
+        // ── vidzer /w/{token} HTML ──
         val vidzerHtml = try {
             client.newCall(Request.Builder()
                 .url(vidzerUrl)
@@ -435,7 +460,7 @@ class CineFreakProvider : MainAPI {
 
         val fullApi = if (apiUrlRaw.startsWith("http")) apiUrlRaw else "https://vidzer.me$apiUrlRaw"
 
-        // STEP 5: ciphertext
+        // ── ciphertext ──
         val cipherResp = try {
             client.newCall(Request.Builder()
                 .url(fullApi)
@@ -471,7 +496,7 @@ class CineFreakProvider : MainAPI {
             return@withContext null
         }
 
-        // STEP 6: AES-GCM decrypt
+        // ── AES-GCM decrypt ──
         val plaintext = try {
             val key = base64UrlDecode(qk.reversed())
             val ct = base64UrlDecode(cipherPart)
