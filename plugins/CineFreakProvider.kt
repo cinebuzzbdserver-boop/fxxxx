@@ -330,20 +330,13 @@ class CineFreakProvider : MainAPI {
                     "<b>URL:</b> <code>$cleanUrl</code>\n<b>Domain:</b> <code>$domainOrigin</code>"
                 )
 
-                // ধাপ ১: গেটওয়ে পেজ ফেচ করা (ব্রাউজারের মতো স্ট্যান্ডার্ড নেভিগেশন হেডার সহ)
+                // ধাপ ১: গেটওয়ে পেজ লোড
                 val initReq = Request.Builder()
                     .url(cleanUrl)
                     .header("User-Agent", userAgent)
                     .header("Referer", getBaseUrl() + "/")
-                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                     .header("Accept-Language", "en-US,en;q=0.9")
-                    .header("sec-ch-ua", "\"Android WebView\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
-                    .header("sec-ch-ua-mobile", "?1")
-                    .header("sec-ch-ua-platform", "\"Android\"")
-                    .header("sec-fetch-dest", "document")
-                    .header("sec-fetch-mode", "navigate")
-                    .header("sec-fetch-site", "none")
-                    .header("upgrade-insecure-requests", "1")
                     .build()
 
                 var landingHtml = ""
@@ -352,38 +345,31 @@ class CineFreakProvider : MainAPI {
                 }
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
-                // ধাপ ২: /view-ping পাঠানো এবং Redis সেশন সিঙ্ক হওয়ার জন্য অপেক্ষা
-                val viewPingUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}view-ping" else "$cleanUrl/view-ping"
-                val pingCookies = getResolvedCookiesStr()
-                val viewPingReq = Request.Builder()
-                    .url(viewPingUrl)
-                    .header("User-Agent", userAgent)
-                    .header("Referer", cleanUrl)
-                    .header("Accept", "*/*")
-                    .header("X-Requested-With", "XMLHttpRequest")
-                    .header("sec-ch-ua", "\"Android WebView\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
-                    .header("sec-ch-ua-mobile", "?1")
-                    .header("sec-ch-ua-platform", "\"Android\"")
-                    .header("sec-fetch-dest", "empty")
-                    .header("sec-fetch-mode", "cors")
-                    .header("sec-fetch-site", "same-origin")
+                // ধাপ ২: ব্যাকগ্রাউন্ড ভিউ-পিং (Fire-and-forget)
+                try {
+                    val viewPingUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}view-ping" else "$cleanUrl/view-ping"
+                    val viewPingCookies = getResolvedCookiesStr()
+                    val viewPingReq = Request.Builder()
+                        .url(viewPingUrl)
+                        .header("User-Agent", userAgent)
+                        .header("Referer", cleanUrl)
+                        .header("Accept", "*/*")
+                        .header("X-Requested-With", "XMLHttpRequest")
 
-                if (pingCookies.isNotBlank()) viewPingReq.header("Cookie", pingCookies)
+                    if (viewPingCookies.isNotBlank()) viewPingReq.header("Cookie", viewPingCookies)
+                    sessionClient.newCall(viewPingReq.build()).execute().close()
+                } catch (_: Throwable) {}
 
-                var viewPingStatus = 0
-                sessionClient.newCall(viewPingReq.build()).execute().use { resp ->
-                    viewPingStatus = resp.code
+                // ধাপ ৩: আগে টার্নস্টাইল টোকেন সলভ করা
+                sendTelegramLog("3. Turnstile Solving", "Requesting token for siteKey: <code>$siteKey</code>")
+                val cfToken = requestTurnstileToken(siteKey, domainOrigin)
+                if (cfToken.isNullOrBlank()) {
+                    sendTelegramLog("FAILED", "Turnstile bridge returned null or blank token.")
+                    return@withLock null
                 }
+                sendTelegramLog("3. Turnstile Solved", "Token acquired successfully: <code>${cfToken.take(35)}...</code>")
 
-                sendTelegramLog(
-                    "2. View-Ping Check",
-                    "<b>Endpoint:</b> <code>$viewPingUrl</code>\n<b>Status Code:</b> $viewPingStatus\n<b>Cookies Sent:</b> <code>$pingCookies</code>"
-                )
-
-                // Redis-এ ভিউ প্রসেস হতে বাস্তব ব্রাউজারের মতো ১.৫ সেকেন্ড বিরতি
-                delay(1500L)
-
-                // ধাপ ৩: /n টোকেন সংগ্রহ
+                // ধাপ ৪: টার্নস্টাইল সলভ হওয়ার পর ফ্রেশ /n টোকেন জেনারেট করা
                 val nCookies = getResolvedCookiesStr()
                 val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
                 val nReqBuilder = Request.Builder()
@@ -412,19 +398,14 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
+                sendTelegramLog("4. /n Token Extracted", "<b>n Token:</b> <code>$nToken</code>")
+
                 if (nToken.isEmpty()) {
                     sendTelegramLog("FAILED", "Could not extract 'n' token from /n endpoint.")
                     return@withLock null
                 }
 
-                // ধাপ ৪: টার্নস্টাইল সলভ
-                val cfToken = requestTurnstileToken(siteKey, domainOrigin)
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramLog("FAILED", "Turnstile bridge returned null token.")
-                    return@withLock null
-                }
-
-                // ধাপ ৫: /unlock এন্ডপয়েন্ট কল করা
+                // ধাপ ৫: দেরি না করে সাথে সাথে /unlock হিট করা
                 val unlockCookies = getResolvedCookiesStr()
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
@@ -463,12 +444,15 @@ class CineFreakProvider : MainAPI {
 
                 sendTelegramLog(
                     "5. Unlock Original Response",
-                    "<b>Raw Response (Truncated):</b>\n<pre>${rawUnlockResponse.take(3000)}</pre>"
+                    "<b>Raw Response:</b>\n<pre>${rawUnlockResponse.take(2500)}</pre>"
                 )
 
-                if (unlockHtml.isBlank()) return@withLock null
+                if (unlockHtml.isBlank()) {
+                    sendTelegramLog("FAILED", "Unlock failed or payload was empty.")
+                    return@withLock null
+                }
 
-                // ধাপ ৬: বাটন পার্স করা (aria-hidden বাদ দিয়ে শুধুমাত্র দৃশ্যমান বাটন নেওয়া)
+                // ধাপ ৬: বাটন পার্স করা
                 val cleanedHtml = unlockHtml.replace(
                     Regex("""<div[^>]*aria-hidden\s*=\s*['"]true['"][^>]*>[\s\S]*?</div>""", RegexOption.IGNORE_CASE),
                     ""
@@ -487,7 +471,6 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
-                // যদি ক্লিনড HTML-এ না মেলে, মূল HTML-এর সব FAST CLOUD নেওয়া
                 if (candidateList.isEmpty()) {
                     for (m in fastCloudRegex.findAll(unlockHtml)) {
                         val p = m.groupValues[1].trim()
@@ -502,13 +485,10 @@ class CineFreakProvider : MainAPI {
                     "<b>Total Found:</b> ${candidateList.size}\n<b>List:</b>\n<code>${candidateList.joinToString("\n")}</code>"
                 )
 
-                if (candidateList.isEmpty()) {
-                    sendTelegramLog("FAILED", "No Fast Cloud candidates found.")
-                    return@withLock null
-                }
+                if (candidateList.isEmpty()) return@withLock null
 
-                // ধাপ ৭: ক্লায়েন্ট-সাইড টাইমআউট সিমুলেশন (ব্রাউজার স্ক্রিপ্টের হুবহু ৫.৫ সেকেন্ড অপেক্ষা)
-                sendTelegramLog("7. Browser Simulation Delay", "Waiting 5,600ms to bypass anti-bot click timing...")
+                // ধাপ ৭: ব্রাউজারের ক্লিক টাইমার সিমুলেশন (৫,৬০০ মি.সে.)
+                sendTelegramLog("7. Waiting", "Simulating browser button timer (5,600ms)...")
                 delay(5600L)
 
                 // ধাপ ৮: কালেক্ট করা সবগুলো লিংকের রিডাইরেকশন টেস্ট করা
@@ -527,6 +507,7 @@ class CineFreakProvider : MainAPI {
                         .url(fullPath)
                         .header("User-Agent", userAgent)
                         .header("Referer", cleanUrl)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
                         .header("sec-ch-ua", "\"Android WebView\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
                         .header("sec-ch-ua-mobile", "?1")
                         .header("sec-ch-ua-platform", "\"Android\"")
@@ -535,7 +516,6 @@ class CineFreakProvider : MainAPI {
                         .header("sec-fetch-site", "same-origin")
                         .header("sec-fetch-user", "?1")
                         .header("upgrade-insecure-requests", "1")
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 
                     if (finalCookies.isNotBlank()) {
                         directReqBuilder.header("Cookie", finalCookies)
@@ -565,7 +545,7 @@ class CineFreakProvider : MainAPI {
 
                 sendTelegramLog(
                     "8. Final Resolution",
-                    "<b>Redirect Verifications:</b>\n$redirectLogs\n<b>Valid Resolved URL:</b> <code>$resolvedStreamUrl</code>\n<b>Cookies:</b> <code>$finalCookies</code>"
+                    "<b>Redirect Verifications:</b>\n$redirectLogs\n<b>Valid Resolved URL:</b> <code>$resolvedStreamUrl</code>"
                 )
 
                 if (resolvedStreamUrl.isEmpty()) return@withLock null
