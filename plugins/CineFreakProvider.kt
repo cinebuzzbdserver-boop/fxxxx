@@ -37,7 +37,6 @@ class CineFreakProvider : MainAPI {
 
     private val resolveMutex = Mutex()
 
-    // ── Telegram debug ──
     private val telegramBotToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
     private val telegramChatId = "5548923721"
     private val debugEnabled = true
@@ -258,10 +257,10 @@ class CineFreakProvider : MainAPI {
 
     // ═══════════════════════════════════════════════════════════
     // vidzer ফ্লো — ব্রাউজারের হুবহু সিকোয়েন্স
-    //   1. Warm session (post page GET)
+    //   1. Warm session
     //   2. POST /play (ts ছাড়া)
-    //   3. 401 + need=ts → Turnstile solve → POST /play (ts সহ)
-    //   4. 200 ready → vidzer URL → qk/apiUrl → cipher → AES-GCM → videoUrl
+    //   3. 401 → Turnstile solve → POST /play (ts সহ)
+    //   4. 200 → vidzer URL → qk/apiUrl → cipher → AES-GCM → videoUrl
     // ═══════════════════════════════════════════════════════════
 
     private suspend fun resolveVidzerStream(
@@ -364,32 +363,63 @@ class CineFreakProvider : MainAPI {
             // ── STEP 3: 401 + need=ts হলে Turnstile solve করে retry ──
             if (playCode == 401 && playJson.optString("need") == "ts") {
                 sendTelegramLog("4. Turnstile Required", "Solving with sitekey=$tsKey, origin=https://cinefreak.net")
-                val cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
+
+                var cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
                 if (cfToken.isNullOrBlank()) {
                     sendTelegramLog("4a. TURNSTILE FAILED", "token null/blank")
                     return@withContext null
                 }
-                sendTelegramLog("4b. Turnstile OK", "<code>${esc(cfToken, 250)}</code>")
 
-                // ব্রাউজারের মতো ছোট natural delay
+                // টোকেনের dot count দেখুন
+                val dotCount = cfToken.count { it == '.' }
+                sendTelegramLog(
+                    "4b. Turnstile OK",
+                    "<b>len:</b> ${cfToken.length}\n" +
+                    "<b>dots:</b> $dotCount\n" +
+                    "<b>head:</b> <code>${esc(cfToken.take(40), 50)}</code>\n" +
+                    "<b>tail:</b> <code>${esc(cfToken.takeLast(40), 50)}</code>"
+                )
+
+                // ── প্রথম চেষ্টা: যেটা TurnstileBridge দিয়েছে সেটাই ──
                 delay(300L)
 
                 sendTelegramLog("4c. POST /play (with ts)", "Retry with Turnstile token")
-                val pair2 = postPlay(cfToken)
-                playCode = pair2.first
-                playResp = pair2.second
+                var (c2, r2) = postPlay(cfToken)
                 sendTelegramLog(
                     "4d. RESPONSE (with ts)",
-                    "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1500)}</pre>"
+                    "<b>HTTP:</b> $c2\n<pre>${esc(r2, 1500)}</pre>"
                 )
 
-                if (playResp.isBlank()) return@withContext null
+                var finalCode = c2
+                var finalResp = r2
+
+                // ── দ্বিতীয় চেষ্টা: যদি raw টোকেন (১ dot) দিয়ে fail হয়, mock ৩ dot ট্রাই ──
+                if (c2 == 401 && dotCount < 3) {
+                    sendTelegramLog(
+                        "4e. RETRY with mock 3-dot format",
+                        "Raw token had $dotCount dots, adding fake session + hash"
+                    )
+                    val sessionPart = generateSessionPart()
+                    val hashPart = "0".repeat(64)
+                    val mockToken = "$cfToken.$sessionPart.$hashPart"
+                    delay(300L)
+                    val pair3 = postPlay(mockToken)
+                    finalCode = pair3.first
+                    finalResp = pair3.second
+                    sendTelegramLog(
+                        "4f. RESPONSE (mock 3-dot)",
+                        "<b>HTTP:</b> $finalCode\n<pre>${esc(finalResp, 1500)}</pre>"
+                    )
+                }
+
+                playCode = finalCode
+                playResp = finalResp
                 playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
 
                 if (playCode == 401) {
                     sendTelegramLog(
-                        "4e. STILL 401",
-                        "TurnstileBridge টোকেন সার্ভার গ্রহণ করেনি। সেশন/cookie mismatch।"
+                        "4g. STILL 401",
+                        "TurnstileBridge টোকেন server গ্রহণ করেনি। TurnstileBridge এর সেশন/cookie সমস্যা।"
                     )
                     return@withContext null
                 }
@@ -403,6 +433,15 @@ class CineFreakProvider : MainAPI {
             sendTelegramLog("CRASH", "${t.stackTraceToString().take(1500)}")
             null
         }
+    }
+
+    // 22-char base64url session part (mimics what browser sends)
+    private fun generateSessionPart(): String {
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        val rnd = java.security.SecureRandom()
+        val sb = StringBuilder()
+        repeat(22) { sb.append(chars[rnd.nextInt(chars.length)]) }
+        return sb.toString()
     }
 
     private suspend fun handleVidzerPlayJson(
@@ -554,7 +593,6 @@ class CineFreakProvider : MainAPI {
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
         if (generateUrl.isBlank()) return@withContext null
 
-        // vidzer ফ্লো
         if (generateUrl.startsWith("vidzer://")) {
             val parts = generateUrl.removePrefix("vidzer://").split("|")
             if (parts.size < 4) return@withContext null
