@@ -263,9 +263,7 @@ class CineFreakProvider : MainAPI {
                 domainUrl = domainOrigin,
                 timeoutMs = 120_000L
             )
-            if (!directToken.isNullOrBlank()) {
-                return directToken.trim()
-            }
+            if (!directToken.isNullOrBlank()) return directToken.trim()
         } catch (_: Throwable) {}
 
         System.setProperty("moviefy.turnstile.token", "")
@@ -322,47 +320,56 @@ class CineFreakProvider : MainAPI {
                 val domainOrigin = "${targetUri.scheme}://${targetUri.host}"
                 val targetHttpUrl = cleanUrl.toHttpUrlOrNull() ?: return@withLock null
 
-                // হেল্পার ফাংশন: স্টোরেজ থেকে সব অরিজিনাল কুকি (ci_session, cf_pass) এক সাথে রিড করার জন্য
                 fun getResolvedCookiesStr(): String {
                     val cookies = scopedCookieJar.loadForRequest(targetHttpUrl)
                     return cookies.joinToString("; ") { "${it.name}=${it.value}" }
                 }
 
-                sendTelegramLog(
-                    "1. Target Received",
-                    "<b>URL:</b> <code>$cleanUrl</code>\n<b>Domain:</b> <code>$domainOrigin</code>"
-                )
-
-                // ধাপ ১: গেটওয়ে পেজ ফেচ করে সাইটকি নেওয়া
+                // ধাপ ১: গেটওয়ে পেজ ফেচ করা
                 val initReq = Request.Builder()
                     .url(cleanUrl)
                     .header("User-Agent", userAgent)
                     .header("Referer", getBaseUrl() + "/")
                     .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                    .header("Accept-Language", "en-US,en;q=0.9")
                     .build()
 
                 var landingHtml = ""
                 sessionClient.newCall(initReq).execute().use { resp ->
                     landingHtml = resp.body?.string().orEmpty()
                 }
-
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
-                // ধাপ ২: /n কল করে n (bc) টোকেন সংগ্রহ
-                val currentCookiesStep2 = getResolvedCookiesStr()
-                val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
+                // ধাপ ২: /view-ping রিকোয়েস্ট পাঠানো (Anti-Bot Verification)
+                val viewPingUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}view-ping" else "$cleanUrl/view-ping"
+                var viewPingStatus = 0
+                val pingCookies = getResolvedCookiesStr()
+                val viewPingReq = Request.Builder()
+                    .url(viewPingUrl)
+                    .header("User-Agent", userAgent)
+                    .header("Referer", cleanUrl)
+                    .header("Accept", "*/*")
+                    .header("X-Requested-With", "XMLHttpRequest")
+                if (pingCookies.isNotBlank()) viewPingReq.header("Cookie", pingCookies)
+
+                sessionClient.newCall(viewPingReq.build()).execute().use { resp ->
+                    viewPingStatus = resp.code
+                }
                 
+                sendTelegramLog(
+                    "2. View-Ping Check",
+                    "<b>Endpoint:</b> <code>$viewPingUrl</code>\n<b>Status Code:</b> $viewPingStatus\n<b>Cookies Sent:</b> <code>$pingCookies</code>"
+                )
+
+                // ধাপ ৩: /n টোকেন সংগ্রহ
+                val nCookies = getResolvedCookiesStr()
+                val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
                 val nReqBuilder = Request.Builder()
                     .url(nUrl)
                     .header("User-Agent", userAgent)
-                    .header("Referer", cleanUrl) // EXACT ORIGINAL URL
+                    .header("Referer", cleanUrl)
                     .header("Accept", "*/*")
                     .header("X-Requested-With", "XMLHttpRequest")
-                
-                if (currentCookiesStep2.isNotBlank()) {
-                    nReqBuilder.header("Cookie", currentCookiesStep2)
-                }
+                if (nCookies.isNotBlank()) nReqBuilder.header("Cookie", nCookies)
 
                 var nToken = ""
                 sessionClient.newCall(nReqBuilder.build()).execute().use { resp ->
@@ -375,20 +382,14 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
-                if (nToken.isEmpty()) {
-                    sendTelegramLog("FAILED", "Could not extract 'n' token from /n endpoint.")
-                    return@withLock null
-                }
+                if (nToken.isEmpty()) return@withLock null
 
-                // ধাপ ৩: টার্নস্টাইল সলভ
+                // ধাপ ৪: টার্নস্টাইল সলভ
                 val cfToken = requestTurnstileToken(siteKey, domainOrigin)
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramLog("FAILED", "Turnstile bridge returned null or blank token.")
-                    return@withLock null
-                }
+                if (cfToken.isNullOrBlank()) return@withLock null
 
-                // ধাপ ৪: /unlock এন্ডপয়েন্টে রিকোয়েস্ট পাঠিয়ে বাটন ও cf_pass সংগ্রহ
-                val currentCookiesStep4 = getResolvedCookiesStr()
+                // ধাপ ৫: /unlock এন্ডপয়েন্ট কল করা এবং Raw Response সেভ করা
+                val unlockCookies = getResolvedCookiesStr()
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
                 val unlockBody = "ts=${URLEncoder.encode(cfToken, "UTF-8")}&bc=${URLEncoder.encode(nToken, "UTF-8")}"
@@ -397,21 +398,20 @@ class CineFreakProvider : MainAPI {
                     .url(unlockUrl)
                     .post(unlockBody.toRequestBody(formMediaType))
                     .header("User-Agent", userAgent)
-                    .header("Referer", cleanUrl) // EXACT ORIGINAL URL
+                    .header("Referer", cleanUrl)
                     .header("Origin", domainOrigin)
                     .header("X-Requested-With", "XMLHttpRequest")
                     .header("Accept", "*/*")
                 
-                if (currentCookiesStep4.isNotBlank()) {
-                    unlockReqBuilder.header("Cookie", currentCookiesStep4)
-                }
+                if (unlockCookies.isNotBlank()) unlockReqBuilder.header("Cookie", unlockCookies)
 
                 var unlockHtml = ""
+                var rawUnlockResponse = ""
                 sessionClient.newCall(unlockReqBuilder.build()).execute().use { resp ->
-                    val unlockRawResp = resp.body?.string().orEmpty()
-                    if (unlockRawResp.isNotBlank()) {
+                    rawUnlockResponse = resp.body?.string().orEmpty()
+                    if (rawUnlockResponse.isNotBlank()) {
                         try {
-                            val json = JSONObject(unlockRawResp)
+                            val json = JSONObject(rawUnlockResponse)
                             if (json.optBoolean("ok", false)) {
                                 unlockHtml = json.optString("html", "")
                             }
@@ -419,55 +419,34 @@ class CineFreakProvider : MainAPI {
                     }
                 }
 
-                if (unlockHtml.isBlank()) {
-                    sendTelegramLog("FAILED", "Unlock HTML payload was empty.")
-                    return@withLock null
-                }
-
-                // ধাপ ৫: বাটনগুলো পার্স করা এবং ফেক লিংক বাদ দেওয়া
-                // aria-hidden="true" যুক্ত div (ফেক লিংক কন্টেইনার) সম্পূর্ণ ডিলিট করা হচ্ছে
-                val cleanedHtml = unlockHtml.replace(
-                    Regex("""<div[^>]*aria-hidden\s*=\s*['"]true['"][^>]*>[\s\S]*?</div>""", RegexOption.IGNORE_CASE),
-                    ""
+                // টেলিগ্রামে অরিজিনাল আনলক রেসপন্স পাঠানো
+                sendTelegramLog(
+                    "5. Unlock Original Response",
+                    "<b>Raw Response (Truncated if large):</b>\n<pre>${rawUnlockResponse.take(3000)}</pre>"
                 )
-                
-                // শুধুমাত্র [FSL] নয়, FAST CLOUD লেখা থাকা যেকোনো বাটন টার্গেট করা হচ্ছে (যেমন: FAST CLOUD [V2])
+
+                if (unlockHtml.isBlank()) return@withLock null
+
+                // ধাপ ৬: সবগুলো FAST CLOUD লিংক এক্সট্রাক্ট করা (aria-hidden ইগনোর করে সব নেওয়া)
                 val fastCloudRegex = Regex(
                     """<a\s+[^>]*href="([^"]+)"[^>]*>[\s\S]*?FAST CLOUD[\s\S]*?</a>""",
                     RegexOption.IGNORE_CASE
                 )
                 
                 val candidateList = mutableListOf<String>()
-                
-                // ক্লিন করা HTML থেকে সবকয়টি FAST CLOUD পাথ কালেক্ট করা হচ্ছে
-                for (m in fastCloudRegex.findAll(cleanedHtml)) {
+                for (m in fastCloudRegex.findAll(unlockHtml)) {
                     val p = m.groupValues[1].trim()
                     if (p.isNotEmpty() && !candidateList.contains(p)) {
                         candidateList.add(p)
                     }
                 }
-                
-                // ফলব্যাক: যদি ক্লিন করায় কোনো সমস্যা হয়, তাহলে মূল HTML থেকে নেওয়ার চেষ্টা
-                if (candidateList.isEmpty()) {
-                    for (m in fastCloudRegex.findAll(unlockHtml)) {
-                        val p = m.groupValues[1].trim()
-                        if (p.isNotEmpty() && !candidateList.contains(p)) {
-                            candidateList.add(p)
-                        }
-                    }
-                }
 
                 sendTelegramLog(
-                    "6. Parsed Candidates",
-                    "<b>Total FAST CLOUD Found:</b> ${candidateList.size}\n<b>List:</b>\n<code>${candidateList.joinToString("\n")}</code>"
+                    "6. Candidates Parsed",
+                    "<b>Total Links Found:</b> ${candidateList.size}\n<b>Paths:</b>\n<code>${candidateList.joinToString("\n")}</code>"
                 )
 
-                if (candidateList.isEmpty()) {
-                    sendTelegramLog("FAILED", "No download button candidates found.")
-                    return@withLock null
-                }
-
-                // ধাপ ৬: কালেক্ট করা সবকয়টি লিংক পর্যায়ক্রমে রিডাইরেকশন টেস্ট করা
+                // ধাপ ৭: সবগুলো লিংকের রিডাইরেকশন টেস্ট করা
                 val noRedirectClient = sessionClient.newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
@@ -482,7 +461,7 @@ class CineFreakProvider : MainAPI {
                     val directReqBuilder = Request.Builder()
                         .url(fullPath)
                         .header("User-Agent", userAgent)
-                        .header("Referer", cleanUrl) // EXACT ORIGINAL URL
+                        .header("Referer", cleanUrl) 
 
                     if (finalCookies.isNotBlank()) {
                         directReqBuilder.header("Cookie", finalCookies)
@@ -492,7 +471,7 @@ class CineFreakProvider : MainAPI {
                         noRedirectClient.newCall(directReqBuilder.build()).execute().use { resp ->
                             val statusCode = resp.code
                             val location = resp.header("Location").orEmpty().trim()
-                            redirectLogs.append("Path: <code>$path</code> -> Code: $statusCode, Loc: <code>$location</code>\n")
+                            redirectLogs.append("<b>Path:</b> <code>$path</code>\n<b>Code:</b> $statusCode\n<b>Location:</b> <code>$location</code>\n---\n")
 
                             if (statusCode in 300..399 && location.isNotEmpty()) {
                                 val resolvedLoc = fixUrl(location, domainOrigin)
@@ -500,24 +479,21 @@ class CineFreakProvider : MainAPI {
                                         resolvedLoc.contains("Watch%20Online", ignoreCase = true) ||
                                         resolvedLoc.contains("Watch Online", ignoreCase = true)
 
-                                // যদি লিংকটি ডামি/ফেক না হয়, তবে সেটিই অরিজিনাল স্ট্রিম লিংক
-                                if (!isFakeLink) {
+                                if (!isFakeLink && resolvedStreamUrl.isEmpty()) {
                                     resolvedStreamUrl = resolvedLoc
-                                    return@use // use ব্লক থেকে বের হবে
+                                    // সবগুলো লিংক চেক করে লগ জেনারেট করার জন্য লুপ ব্রেক করা হলো না
                                 }
                             }
                         }
                     } catch (e: Throwable) {
-                        redirectLogs.append("Path: <code>$path</code> -> Error: ${e.message}\n")
+                        redirectLogs.append("<b>Path:</b> <code>$path</code>\n<b>Error:</b> ${e.message}\n---\n")
                     }
-                    
-                    // পেয়ে গেলে আর লুপ চালানোর দরকার নেই
-                    if (resolvedStreamUrl.isNotEmpty()) break
                 }
 
+                // সবগুলো লিংকের ফাইনাল লগ সেন্ড করা
                 sendTelegramLog(
-                    "7. Final Resolution",
-                    "<b>Redirect Verifications:</b>\n$redirectLogs\n<b>Resolved URL:</b> <code>$resolvedStreamUrl</code>\n<b>Cookie Header:</b> <code>$finalCookies</code>"
+                    "7. Redirect Verifications",
+                    "<b>Results:</b>\n$redirectLogs\n<b>Final Valid URL:</b> <code>$resolvedStreamUrl</code>\n<b>Final Cookies:</b> <code>$finalCookies</code>"
                 )
 
                 if (resolvedStreamUrl.isEmpty()) return@withLock null
@@ -536,7 +512,7 @@ class CineFreakProvider : MainAPI {
                     headers = finalHeaders
                 )
             } catch (t: Throwable) {
-                sendTelegramLog("CRASH ERROR", "Exception in resolveDirectLink: <code>${t.message}</code>")
+                sendTelegramLog("CRASH ERROR", "Exception: <code>${t.message}</code>")
                 null
             }
         }
