@@ -350,7 +350,6 @@ class CineFreakProvider : MainAPI {
                 val siteKey = extractTurnstileSiteKey(landingHtml) ?: "0x4AAAAAAFUBbDesHlySPLsN"
 
                 // ধাপ ২: /n কল করে n (bc) টোকেন সংগ্রহ
-                // এখানে অরিজিনাল ইউআরএল Referer হিসেবে এবং সেশন কুকি পাঠানো হচ্ছে
                 val currentCookiesStep2 = getResolvedCookiesStr()
                 val nUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}n" else "$cleanUrl/n"
                 
@@ -389,7 +388,6 @@ class CineFreakProvider : MainAPI {
                 }
 
                 // ধাপ ৪: /unlock এন্ডপয়েন্টে রিকোয়েস্ট পাঠিয়ে বাটন ও cf_pass সংগ্রহ
-                // এখানেও অরিজিনাল ইউআরএল Referer হিসেবে এবং আপডেট হওয়া কুকি পাঠানো হচ্ছে
                 val currentCookiesStep4 = getResolvedCookiesStr()
                 val unlockUrl = if (cleanUrl.endsWith("/")) "${cleanUrl}unlock" else "$cleanUrl/unlock"
                 val formMediaType = "application/x-www-form-urlencoded".toMediaType()
@@ -426,43 +424,55 @@ class CineFreakProvider : MainAPI {
                     return@withLock null
                 }
 
-                // ধাপ ৫: বাটনগুলো পার্স করা
+                // ধাপ ৫: বাটনগুলো পার্স করা এবং ফেক লিংক বাদ দেওয়া
+                // aria-hidden="true" যুক্ত div (ফেক লিংক কন্টেইনার) সম্পূর্ণ ডিলিট করা হচ্ছে
                 val cleanedHtml = unlockHtml.replace(
                     Regex("""<div[^>]*aria-hidden\s*=\s*['"]true['"][^>]*>[\s\S]*?</div>""", RegexOption.IGNORE_CASE),
                     ""
                 )
-                val fslRegex = Regex(
-                    """<a\s+[^>]*href="([^"]+)"[^>]*class="[^"]*fsl-btn[^"]*"[^>]*>[\s\S]*?FAST CLOUD \[FSL\][\s\S]*?</a>""",
+                
+                // শুধুমাত্র [FSL] নয়, FAST CLOUD লেখা থাকা যেকোনো বাটন টার্গেট করা হচ্ছে (যেমন: FAST CLOUD [V2])
+                val fastCloudRegex = Regex(
+                    """<a\s+[^>]*href="([^"]+)"[^>]*>[\s\S]*?FAST CLOUD[\s\S]*?</a>""",
                     RegexOption.IGNORE_CASE
                 )
                 
                 val candidateList = mutableListOf<String>()
-                for (m in fslRegex.findAll(cleanedHtml)) {
+                
+                // ক্লিন করা HTML থেকে সবকয়টি FAST CLOUD পাথ কালেক্ট করা হচ্ছে
+                for (m in fastCloudRegex.findAll(cleanedHtml)) {
                     val p = m.groupValues[1].trim()
                     if (p.isNotEmpty() && !candidateList.contains(p)) {
                         candidateList.add(p)
                     }
                 }
                 
+                // ফলব্যাক: যদি ক্লিন করায় কোনো সমস্যা হয়, তাহলে মূল HTML থেকে নেওয়ার চেষ্টা
                 if (candidateList.isEmpty()) {
-                    for (m in fslRegex.findAll(unlockHtml)) {
+                    for (m in fastCloudRegex.findAll(unlockHtml)) {
                         val p = m.groupValues[1].trim()
-                        if (p.isNotEmpty() && !candidateList.contains(p)) candidateList.add(p)
+                        if (p.isNotEmpty() && !candidateList.contains(p)) {
+                            candidateList.add(p)
+                        }
                     }
                 }
+
+                sendTelegramLog(
+                    "6. Parsed Candidates",
+                    "<b>Total FAST CLOUD Found:</b> ${candidateList.size}\n<b>List:</b>\n<code>${candidateList.joinToString("\n")}</code>"
+                )
 
                 if (candidateList.isEmpty()) {
                     sendTelegramLog("FAILED", "No download button candidates found.")
                     return@withLock null
                 }
 
-                // ধাপ ৬: রিডাইরেকশন টেস্ট করে নিশ্চিত হওয়া (ফেক লিংক বাইপাস)
+                // ধাপ ৬: কালেক্ট করা সবকয়টি লিংক পর্যায়ক্রমে রিডাইরেকশন টেস্ট করা
                 val noRedirectClient = sessionClient.newBuilder()
                     .followRedirects(false)
                     .followSslRedirects(false)
                     .build()
 
-                // অরিজিনাল কুকি (ci_session এবং cf_pass) এবং অরিজিনাল Referer দিয়ে রিডাইরেক্ট চেক করা
                 val finalCookies = getResolvedCookiesStr()
                 var resolvedStreamUrl = ""
                 val redirectLogs = StringBuilder()
@@ -490,20 +500,19 @@ class CineFreakProvider : MainAPI {
                                         resolvedLoc.contains("Watch%20Online", ignoreCase = true) ||
                                         resolvedLoc.contains("Watch Online", ignoreCase = true)
 
+                                // যদি লিংকটি ডামি/ফেক না হয়, তবে সেটিই অরিজিনাল স্ট্রিম লিংক
                                 if (!isFakeLink) {
                                     resolvedStreamUrl = resolvedLoc
-                                    return@use
+                                    return@use // use ব্লক থেকে বের হবে
                                 }
                             }
                         }
                     } catch (e: Throwable) {
                         redirectLogs.append("Path: <code>$path</code> -> Error: ${e.message}\n")
                     }
+                    
+                    // পেয়ে গেলে আর লুপ চালানোর দরকার নেই
                     if (resolvedStreamUrl.isNotEmpty()) break
-                }
-
-                if (resolvedStreamUrl.isEmpty() && candidateList.isNotEmpty()) {
-                    resolvedStreamUrl = fixUrl(candidateList.last(), domainOrigin)
                 }
 
                 sendTelegramLog(
@@ -515,14 +524,14 @@ class CineFreakProvider : MainAPI {
 
                 val finalHeaders = mutableMapOf(
                     "User-Agent" to userAgent,
-                    "Referer" to cleanUrl // ভিডিও প্লেয়ারের জন্যও অরিজিনাল Referer রাখা হলো
+                    "Referer" to cleanUrl
                 )
                 if (finalCookies.isNotBlank()) {
                     finalHeaders["Cookie"] = finalCookies
                 }
 
                 StreamItem(
-                    quality = "FastCloud FSL",
+                    quality = "FastCloud Multi",
                     streamUrl = resolvedStreamUrl,
                     headers = finalHeaders
                 )
