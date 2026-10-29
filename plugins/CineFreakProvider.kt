@@ -37,10 +37,10 @@ class CineFreakProvider : MainAPI {
 
     private val resolveMutex = Mutex()
 
-    // ── Telegram debug (শুধু vidzer ফ্লোতে) ──
+    // ── Telegram debug ──
     private val telegramBotToken = "8594119995:AAHN_cErFPbcFwU0qJhK_zzWuKahTqvV9Ec"
     private val telegramChatId = "5548923721"
-    private val debugEnabled = true   // debug শেষ হলে false করে দিন
+    private val debugEnabled = true
 
     private val baseClient = OkHttpClient.Builder()
         .connectTimeout(25, TimeUnit.SECONDS)
@@ -69,10 +69,6 @@ class CineFreakProvider : MainAPI {
 
     private fun esc(s: String, max: Int = 1200): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").take(max)
-
-    // ═══════════════════════════════════════════════════════════
-    // BASIC HELPERS (cinecloud ফ্লোর জন্য)
-    // ═══════════════════════════════════════════════════════════
 
     private fun getBaseUrl(): String {
         val clean = mainUrl.trim().trimEnd('/')
@@ -172,15 +168,11 @@ class CineFreakProvider : MainAPI {
         } catch (_: Throwable) { emptyList() }
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // loadMediaStructure — vidzer সবার আগে, তারপর cinecloud links
-    // ═══════════════════════════════════════════════════════════
-
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val html = fetchHtml(postUrl)
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // ── vidzer config স্ক্র্যাপ (সবার আগে) ──
+        // ── vidzer config (সবার আগে) ──
         val playApi = Regex("""const\s+PLAY_API\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
             .find(html)?.groupValues?.get(1)?.replace("\\/", "/")?.trim()
         val tsKey = Regex("""const\s+TS_SITE_KEY\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
@@ -193,7 +185,7 @@ class CineFreakProvider : MainAPI {
             rawLinks.add(Pair("▶ Watch Online (FastCloud Stream)", encoded))
         }
 
-        // ── cinecloud download links (আগের মতোই) ──
+        // ── cinecloud download links ──
         val sectionRegex = Regex(
             """<h4\s+class="movie-title"[^>]*>([\s\S]*?)</h4>[\s\S]*?<div\s+class="dlbtn-container"[^>]*>([\s\S]*?)</div>""",
             RegexOption.IGNORE_CASE
@@ -224,10 +216,6 @@ class CineFreakProvider : MainAPI {
         MediaStructure(false, rawLinks.distinctBy { it.second }, emptyList())
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // Turnstile helper
-    // ═══════════════════════════════════════════════════════════
-
     private fun extractTurnstileSiteKey(html: String): String? {
         val patterns = listOf(
             Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
@@ -255,10 +243,6 @@ class CineFreakProvider : MainAPI {
         return null
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // AES-GCM + base64url
-    // ═══════════════════════════════════════════════════════════
-
     private fun base64UrlDecode(s: String): ByteArray {
         val padded = s.replace('-', '+').replace('_', '/')
         val pad = (4 - padded.length % 4) % 4
@@ -275,7 +259,7 @@ class CineFreakProvider : MainAPI {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // vidzer ফ্লো — ব্রাউজারের হুবহু আচরণ
+    // vidzer ফ্লো — Turnstile আগে, তারপর /play POST
     // ═══════════════════════════════════════════════════════════
 
     private suspend fun resolveVidzerStream(
@@ -317,7 +301,7 @@ class CineFreakProvider : MainAPI {
                 "<b>postUrl:</b> <code>${esc(postUrlForReferer, 200)}</code>"
             )
 
-            // STEP 0: পোস্ট পেজে GET — session cookies লোড
+            // STEP 1: পোস্ট পেজে GET (session cookies লোড)
             try {
                 val warmHtml = client.newCall(Request.Builder()
                     .url(postUrlForReferer)
@@ -333,9 +317,17 @@ class CineFreakProvider : MainAPI {
                 sendTelegramLog("2. Warm Session FAIL", "${e.message}")
             }
 
-            // STEP 1: প্রথমে ts ছাড়াই /play POST (ব্রাউজারের মতো)
-            sendTelegramLog("3. First /play (no ts)", "Trying without Turnstile...")
-            val body1 = "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}"
+            // STEP 2: Turnstile solve — প্রথমেই
+            sendTelegramLog("3. Turnstile Solving", "sitekey=$tsKey, origin=https://cinefreak.net")
+            val cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
+            if (cfToken.isNullOrBlank()) {
+                sendTelegramLog("3a. TURNSTILE FAILED", "token null/blank")
+                return@withContext null
+            }
+            sendTelegramLog("3b. Turnstile OK", "<code>${esc(cfToken, 200)}</code>")
+
+            // STEP 3: /play POST WITH ts
+            val body = "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}&ts=${URLEncoder.encode(cfToken, "UTF-8")}"
                 .toRequestBody("application/x-www-form-urlencoded".toMediaType())
 
             var playCode = 0
@@ -343,7 +335,7 @@ class CineFreakProvider : MainAPI {
             try {
                 client.newCall(Request.Builder()
                     .url(playApi)
-                    .post(body1)
+                    .post(body)
                     .header("User-Agent", userAgent)
                     .header("Referer", postUrlForReferer)
                     .header("Origin", "https://cinefreak.net")
@@ -359,67 +351,26 @@ class CineFreakProvider : MainAPI {
                         playResp = it.body?.string().orEmpty()
                     }
             } catch (e: Throwable) {
-                sendTelegramLog("3. NETWORK FAIL", "${e.message}")
+                sendTelegramLog("4. NETWORK FAIL", "${e.message}")
                 return@withContext null
             }
+
             sendTelegramLog(
-                "3. First /play response",
-                "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1200)}</pre>"
+                "4. /play RESPONSE",
+                "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1500)}</pre>"
             )
 
             if (playResp.isBlank()) return@withContext null
-            var playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
+            val playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
 
-            // STEP 2: 401 + need=ts → Turnstile solve করে retry
-            if (playCode == 401 && playJson.optString("need") == "ts") {
-                sendTelegramLog("4. Turnstile Required", "Solving with sitekey=$tsKey, origin=https://cinefreak.net")
-                val cfToken = requestTurnstileToken(tsKey, "https://cinefreak.net")
-                if (cfToken.isNullOrBlank()) {
-                    sendTelegramLog("4a. TURNSTILE FAILED", "token null/blank")
-                    return@withContext null
-                }
-                sendTelegramLog("4b. Turnstile OK", "<code>${esc(cfToken, 200)}</code>")
-
-                // ছোট delay — ব্রাউজারের natural timing মিমিক
-                delay(400L)
-
-                val body2 = "op=play&ep=${URLEncoder.encode(ep, "UTF-8")}&ts=${URLEncoder.encode(cfToken, "UTF-8")}"
-                    .toRequestBody("application/x-www-form-urlencoded".toMediaType())
-                try {
-                    client.newCall(Request.Builder()
-                        .url(playApi)
-                        .post(body2)
-                        .header("User-Agent", userAgent)
-                        .header("Referer", postUrlForReferer)
-                        .header("Origin", "https://cinefreak.net")
-                        .header("Accept", "*/*")
-                        .header("Accept-Language", "en-US,en;q=0.9,bn;q=0.8")
-                        .header("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-                        .header("X-Requested-With", "XMLHttpRequest")
-                        .header("Sec-Fetch-Site", "same-origin")
-                        .header("Sec-Fetch-Mode", "cors")
-                        .header("Sec-Fetch-Dest", "empty")
-                        .build()).execute().use {
-                            playCode = it.code
-                            playResp = it.body?.string().orEmpty()
-                        }
-                } catch (e: Throwable) {
-                    sendTelegramLog("4c. RETRY NETWORK FAIL", "${e.message}")
-                    return@withContext null
-                }
+            if (playCode == 401) {
                 sendTelegramLog(
-                    "4d. Retry /play response",
-                    "<b>HTTP:</b> $playCode\n<pre>${esc(playResp, 1500)}</pre>"
+                    "4a. TURNSTILE REJECTED",
+                    "TurnstileBridge টোকেন সার্ভার গ্রহণ করেনি। সেশন/cookie mismatch।"
                 )
-                playJson = try { JSONObject(playResp) } catch (_: Throwable) { JSONObject() }
-
-                if (playCode == 401) {
-                    sendTelegramLog("4e. STILL 401", "TurnstileBridge session mismatch")
-                    return@withContext null
-                }
+                return@withContext null
             }
 
-            // STEP 3: vidzer URL হ্যান্ডেল
             return@withContext handleVidzerPlayJson(
                 playJson, playApi, tsKey, ep, postUrlForReferer, client, cookieJar
             )
@@ -447,14 +398,11 @@ class CineFreakProvider : MainAPI {
         )
 
         if (state != "ready" || vidzerUrl.isEmpty()) {
-            sendTelegramLog(
-                "5a. NOT READY",
-                "<pre>${esc(playJson.toString(), 1200)}</pre>"
-            )
+            sendTelegramLog("5a. NOT READY", "<pre>${esc(playJson.toString(), 1200)}</pre>")
             return@withContext null
         }
 
-        // STEP 4: vidzer /w/{token} HTML
+        // STEP 4: vidzer /w/{token}
         val vidzerHtml = try {
             client.newCall(Request.Builder()
                 .url(vidzerUrl)
@@ -578,14 +526,10 @@ class CineFreakProvider : MainAPI {
         )
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // resolveDirectLink — vidzer হলে নতুন ফ্লো, নাহলে cinecloud
-    // ═══════════════════════════════════════════════════════════
-
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
         if (generateUrl.isBlank()) return@withContext null
 
-        // ── vidzer ফ্লো (সবার আগে) ──
+        // vidzer ফ্লো
         if (generateUrl.startsWith("vidzer://")) {
             val parts = generateUrl.removePrefix("vidzer://").split("|")
             if (parts.size < 4) return@withContext null
@@ -597,7 +541,7 @@ class CineFreakProvider : MainAPI {
             )
         }
 
-        // ── cinecloud unlock ফ্লো (অপরিবর্তিত) ──
+        // cinecloud unlock ফ্লো
         resolveMutex.withLock {
             val cookieStore = ConcurrentHashMap<String, MutableList<Cookie>>()
             val cookieJar = object : CookieJar {
@@ -775,10 +719,6 @@ class CineFreakProvider : MainAPI {
             }
         }
     }
-
-    // ═══════════════════════════════════════════════════════════
-    // honeypot + fake redirect helpers (cinecloud ফ্লো)
-    // ═══════════════════════════════════════════════════════════
 
     private fun isHoneypot(html: String): Boolean {
         val l = html.lowercase()
