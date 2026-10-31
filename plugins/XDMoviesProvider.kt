@@ -4,6 +4,8 @@ import com.moviefy.stream.ui.screens.MainAPI
 import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.StreamItem
+import com.moviefy.stream.ui.screens.getEffectiveUserAgentForUrl
+import com.moviefy.stream.ui.screens.mediaHttpClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -11,20 +13,13 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
-import java.util.concurrent.TimeUnit
 
 class XDMoviesProvider : MainAPI {
     override var name = "XDMovies"
     override var mainUrl = "https://huh.xdmovies.wtf"
 
-    private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.8059.43 Mobile Safari/537.36"
-
-    private val baseClient = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    // Directly uses the central Cloudstream-style mediaHttpClient (injected or referenced)
+    private var baseClient: OkHttpClient = mediaHttpClient
 
     private fun getBaseUrl(): String {
         val clean = mainUrl.trim().trimEnd('/')
@@ -35,7 +30,6 @@ class XDMoviesProvider : MainAPI {
         try {
             val reqBuilder = Request.Builder()
                 .url(url)
-                .header("User-Agent", userAgent)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             if (!referer.isNullOrEmpty()) {
                 reqBuilder.header("Referer", referer)
@@ -79,7 +73,6 @@ class XDMoviesProvider : MainAPI {
     }
 
     private fun extractCardImage(cardHtml: String, base: String): String {
-        // ১. সরাসরি TMDB পোস্টারের পাথ ও ফাইলনেম টার্গেট করবে (w500 বা অন্য সাইজ যাই থাকুক)
         val tmdbRegex = Regex("""(?:https?://image\.tmdb\.org)?/t/p/(?:[a-zA-Z0-9_]+/)?([a-zA-Z0-9_-]+\.(?:jpg|jpeg|png|webp))""", RegexOption.IGNORE_CASE)
         val tmdbMatch = tmdbRegex.find(cardHtml)
         if (tmdbMatch != null) {
@@ -87,7 +80,6 @@ class XDMoviesProvider : MainAPI {
             return "https://image.tmdb.org/t/p/original/$fileName"
         }
 
-        // ২. img ট্যাগের স্পেসিফিক src অ্যাট্রিবিউট এক্সট্র্যাক্ট করবে (onerror সম্পূর্ণ বাইপাস করে)
         val imgSrcRegex = Regex("""<img\b[^>]*?\bsrc=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
         val srcMatch = imgSrcRegex.find(cardHtml)?.groupValues?.get(1)?.trim().orEmpty()
 
@@ -133,7 +125,7 @@ class XDMoviesProvider : MainAPI {
                         image = fullImg,
                         url = fullUrl,
                         isPoster = true,
-                        referer = null
+                        referer = "$base/"
                     )
                 )
             }
@@ -149,7 +141,7 @@ class XDMoviesProvider : MainAPI {
         } else {
             "$base/?page=$page"
         }
-        val html = fetchHtml(targetUrl)
+        val html = fetchHtml(targetUrl, "$base/")
         return parseMovieGrid(html, base)
     }
 
@@ -158,11 +150,9 @@ class XDMoviesProvider : MainAPI {
         val list = mutableListOf<MovieItem>()
 
         try {
-            // ১. টোকেন সংগ্রহ
             val tokenUrl = "$base/php/get_token.php"
             val tokenReq = Request.Builder()
                 .url(tokenUrl)
-                .header("User-Agent", userAgent)
                 .header("Referer", "$base/")
                 .header("Accept", "application/json, text/javascript, */*; q=0.01")
                 .header("X-Requested-With", "XMLHttpRequest")
@@ -178,13 +168,11 @@ class XDMoviesProvider : MainAPI {
 
             if (authToken.isEmpty()) return@withContext emptyList()
 
-            // ২. সার্চ এপিআই কল
             val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
             val searchApiUrl = "$base/php/search_api.php?query=$encodedQuery&fuzzy=true"
 
             val searchReq = Request.Builder()
                 .url(searchApiUrl)
-                .header("User-Agent", userAgent)
                 .header("Referer", "$base/")
                 .header("Accept", "application/json, text/javascript, */*; q=0.01")
                 .header("x-auth-token", authToken)
@@ -226,7 +214,7 @@ class XDMoviesProvider : MainAPI {
                                 image = fullImg,
                                 url = fullUrl,
                                 isPoster = true,
-                                referer = null
+                                referer = "$base/"
                             )
                         )
                     }
@@ -240,7 +228,8 @@ class XDMoviesProvider : MainAPI {
     }
 
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        val html = fetchHtml(postUrl)
+        val base = getBaseUrl()
+        val html = fetchHtml(postUrl, "$base/")
         val rawLinks = mutableListOf<Pair<String, String>>()
 
         val packBlockRegex = Regex("""<div[^>]*class=["'][^"']*pack-card[^"']*["'][^>]*>([\s\S]*?)</div>\s*</div>""", RegexOption.IGNORE_CASE)
@@ -294,11 +283,12 @@ class XDMoviesProvider : MainAPI {
 
         try {
             val base = getBaseUrl()
+            val target = generateUrl.trim()
             StreamItem(
                 quality = "Direct Stream",
-                streamUrl = generateUrl.trim(),
+                streamUrl = target,
                 headers = mapOf(
-                    "User-Agent" to userAgent,
+                    "User-Agent" to getEffectiveUserAgentForUrl(target),
                     "Referer" to "$base/"
                 )
             )
