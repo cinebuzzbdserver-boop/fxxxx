@@ -4,8 +4,6 @@ import com.moviefy.stream.ui.screens.MainAPI
 import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.StreamItem
-import com.moviefy.stream.ui.screens.getEffectiveUserAgentForUrl
-import com.moviefy.stream.ui.screens.mediaHttpClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -13,13 +11,24 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 class XDMoviesProvider : MainAPI {
     override var name = "XDMovies"
     override var mainUrl = "https://huh.xdmovies.wtf"
 
-    // Directly uses the central Cloudstream-style mediaHttpClient (injected or referenced)
-    private var baseClient: OkHttpClient = mediaHttpClient
+    private var userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+
+    private var baseClient = OkHttpClient.Builder()
+        .connectTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    private fun getActiveUserAgent(): String {
+        return System.getProperty("moviefy.cf.userAgent")?.takeIf { it.isNotBlank() } ?: userAgent
+    }
 
     private fun getBaseUrl(): String {
         val clean = mainUrl.trim().trimEnd('/')
@@ -30,6 +39,7 @@ class XDMoviesProvider : MainAPI {
         try {
             val reqBuilder = Request.Builder()
                 .url(url)
+                .header("User-Agent", getActiveUserAgent())
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             if (!referer.isNullOrEmpty()) {
                 reqBuilder.header("Referer", referer)
@@ -148,11 +158,13 @@ class XDMoviesProvider : MainAPI {
     override suspend fun search(query: String, page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val base = getBaseUrl()
         val list = mutableListOf<MovieItem>()
+        val activeUa = getActiveUserAgent()
 
         try {
             val tokenUrl = "$base/php/get_token.php"
             val tokenReq = Request.Builder()
                 .url(tokenUrl)
+                .header("User-Agent", activeUa)
                 .header("Referer", "$base/")
                 .header("Accept", "application/json, text/javascript, */*; q=0.01")
                 .header("X-Requested-With", "XMLHttpRequest")
@@ -173,6 +185,7 @@ class XDMoviesProvider : MainAPI {
 
             val searchReq = Request.Builder()
                 .url(searchApiUrl)
+                .header("User-Agent", activeUa)
                 .header("Referer", "$base/")
                 .header("Accept", "application/json, text/javascript, */*; q=0.01")
                 .header("x-auth-token", authToken)
@@ -283,12 +296,11 @@ class XDMoviesProvider : MainAPI {
 
         try {
             val base = getBaseUrl()
-            val target = generateUrl.trim()
             StreamItem(
                 quality = "Direct Stream",
-                streamUrl = target,
+                streamUrl = generateUrl.trim(),
                 headers = mapOf(
-                    "User-Agent" to getEffectiveUserAgentForUrl(target),
+                    "User-Agent" to getActiveUserAgent(),
                     "Referer" to "$base/"
                 )
             )
