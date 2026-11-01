@@ -250,16 +250,21 @@ class XDMoviesProvider : MainAPI {
         
         val extractedItems = mutableListOf<ParsedData>()
 
-        // Helper function to extract items safely based on classes
+        // Helper function to extract items safely based on classes (episode-title, custom-title, pack-title)
         fun extractByRegex(titleClass: String) {
             val combinedRegex = Regex(
-                """<div[^>]*class=["'][^"']*$titleClass[^"']*["'][^>]*>([\s\S]*?)</div>[\s\S]*?<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""",
+                """<[a-zA-Z0-9]+[^>]*class=["'][^"']*$titleClass[^"']*["'][^>]*>([\s\S]*?)</[a-zA-Z0-9]+>[\s\S]*?<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""",
                 RegexOption.IGNORE_CASE
             )
             for (match in combinedRegex.findAll(html)) {
                 val title = decodeHtmlEntities(match.groupValues[1].replace(Regex("<[^>]*>"), "").trim())
                 val url = match.groupValues[2].trim()
-                val size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").trim())
+                
+                var size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), " ").trim())
+                if (size.equals("Download", ignoreCase = true)) {
+                    size = ""
+                }
+
                 if (title.isNotEmpty() && url.isNotEmpty()) {
                     extractedItems.add(ParsedData(title, url, size))
                 }
@@ -272,19 +277,8 @@ class XDMoviesProvider : MainAPI {
         // ২. Movies / Netflix Versions এর জন্য (custom-title)
         extractByRegex("custom-title")
         
-        // ৩. পুরাতন ফর্মেট বা প্যাক কার্ডের জন্য (pack-title)
-        val packRegex = Regex(
-            """<h4[^>]*class=["'][^"']*pack-title[^"']*["'][^>]*>([\s\S]*?)</h4>[\s\S]*?<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""",
-            RegexOption.IGNORE_CASE
-        )
-        for (match in packRegex.findAll(html)) {
-            val title = decodeHtmlEntities(match.groupValues[1].replace(Regex("<[^>]*>"), "").trim())
-            val url = match.groupValues[2].trim()
-            val size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").trim())
-            if (title.isNotEmpty() && url.isNotEmpty()) {
-                extractedItems.add(ParsedData(title, url, size))
-            }
-        }
+        // ৩. Packs/Zips বা পুরাতন ফর্মেটের জন্য (pack-title)
+        extractByRegex("pack-title")
 
         // ৪. ফলব্যাক: যদি স্পেসিফিক ক্লাস না মেলে তবে নরমাল ডাউনলোড বাটন খুঁজবে
         if (extractedItems.isEmpty()) {
@@ -294,55 +288,75 @@ class XDMoviesProvider : MainAPI {
             )
             for (match in fallbackRegex.findAll(html)) {
                 val url = match.groupValues[1].trim()
-                val innerText = decodeHtmlEntities(match.groupValues[2].replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), " ").trim())
-                val title = innerText.ifEmpty { "Download" }
+                var innerText = decodeHtmlEntities(match.groupValues[2].replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), " ").trim())
+                if (innerText.equals("Download", ignoreCase = true)) {
+                    innerText = ""
+                }
+                val title = if (innerText.isNotEmpty()) innerText else "Download Link"
                 if (url.isNotEmpty()) {
                     extractedItems.add(ParsedData(title, url, ""))
                 }
             }
         }
 
-        // ডুপ্লিকেট লিংক বাদ দেওয়া
         val distinctItems = extractedItems.distinctBy { it.url }
 
-        // S..E.. প্যাটার্ন চেক করা (যেমন: S01E05 বা S4E01)
-        val seasonEpisodeRegex = Regex("""[Ss](\d+)[Ee](\d+)""")
-        val isSeriesPost = distinctItems.any { seasonEpisodeRegex.containsMatchIn(it.title) }
+        // নিখুঁত রেজেক্স যা শুধু ডট (.), হাইফেন (-), আন্ডারস্কোর (_) বা স্পেস এর সাথে S01 বা S01E05 খোঁজে
+        val seriesRegex = Regex("""(?i)(?:^|[.\s\-_])[Ss](\d+)(?:[Ee](\d+))?(?:[.\s\-_]|$)""")
+        val isSeriesPost = distinctItems.any { seriesRegex.containsMatchIn(it.title) }
 
         if (isSeriesPost) {
-            // এটি একটি সিরিজ, সিজন ও এপিসোড অনুযায়ী আলাদা করা হবে
-            val seasonMap = mutableMapOf<Int, MutableMap<Int, MutableList<Pair<String, String>>>>()
+            // Map এর স্ট্রাকচার: Season Name -> (Episode Short Name -> List of Links)
+            val seasonCategoryMap = mutableMapOf<String, MutableMap<String, MutableList<Pair<String, String>>>>()
 
             distinctItems.forEach { item ->
-                val match = seasonEpisodeRegex.find(item.title)
+                val match = seriesRegex.find(item.title)
+                val seasonName: String
+                val epShortName: String
+                
                 if (match != null) {
                     val sNum = match.groupValues[1].toIntOrNull() ?: 1
-                    val eNum = match.groupValues[2].toIntOrNull() ?: 1
+                    val eStr = match.groupValues[2] // যদি E না থাকে (যেমন জিপ প্যাক), তাহলে এটি Empty হবে
                     
-                    val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
-                    
-                    seasonMap.getOrPut(sNum) { mutableMapOf() }
-                        .getOrPut(eNum) { mutableListOf() }
-                        .add(Pair(formattedLabel, item.url))
+                    if (eStr.isEmpty()) {
+                        seasonName = "Season $sNum Packs/Zips"
+                        epShortName = "S%02d".format(sNum) // আউটপুট: S01, S02
+                    } else {
+                        seasonName = "Season $sNum"
+                        val eNum = eStr.toIntOrNull() ?: 1
+                        epShortName = "S%02dE%02d".format(sNum, eNum) // আউটপুট: S01E05, S03E01
+                    }
                 } else {
-                    // যদি সিরিজের পেজে কোনো এক্সট্রা ফাইল বা ওএসটি (OST) থাকে, সেটি Season 0 (Extras) তে যাবে
-                    val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
-                    seasonMap.getOrPut(0) { mutableMapOf() }
-                        .getOrPut(0) { mutableListOf() }
-                        .add(Pair(formattedLabel, item.url))
+                    seasonName = "Extras / Other Files"
+                    epShortName = item.title
                 }
+                
+                // লিংকের নামের সাথে অরিজিনাল টাইটেল এবং সাইজ জুড়ে দেওয়া হলো, যেন প্লেয়ারের ভেতরে 1080p নাকি 720p বোঝা যায়
+                val linkLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
+                
+                seasonCategoryMap.getOrPut(seasonName) { mutableMapOf() }
+                    .getOrPut(epShortName) { mutableListOf() }
+                    .add(Pair(linkLabel, item.url))
             }
 
-            val seasonsList = mutableListOf<SeasonItem>()
-            seasonMap.toSortedMap().forEach { (sNum, epMap) ->
-                val seasonName = if (sNum == 0) "Extras / Other Files" else "Season $sNum"
-                val episodesList = mutableListOf<EpisodeItem>()
-                
-                epMap.toSortedMap().forEach { (eNum, links) ->
-                    val epName = if (eNum == 0) "Extra File" else "Episode %02d".format(eNum)
-                    episodesList.add(EpisodeItem(name = epName, rawGenerateLinks = links))
+            // সিজনগুলোকে সঠিকভাবে সর্ট করা 
+            val sortedSeasonNames = seasonCategoryMap.keys.sortedWith(Comparator { a, b ->
+                val numA = Regex("""\d+""").find(a)?.value?.toIntOrNull() ?: 999
+                val numB = Regex("""\d+""").find(b)?.value?.toIntOrNull() ?: 999
+                if (numA != numB) {
+                    numA.compareTo(numB)
+                } else {
+                    a.compareTo(b)
                 }
-                seasonsList.add(SeasonItem(name = seasonName, episodes = episodesList))
+            })
+
+            val seasonsList = sortedSeasonNames.map { sName ->
+                val epMap = seasonCategoryMap[sName]!!
+                // এপিসোডগুলোকে S01E01, S01E02 অ্যালফাবেটিক্যালি সর্ট করা হচ্ছে
+                val episodesList = epMap.keys.sorted().map { epName ->
+                    EpisodeItem(name = epName, rawGenerateLinks = epMap[epName]!!)
+                }
+                SeasonItem(name = sName, episodes = episodesList)
             }
 
             return@withContext MediaStructure(
@@ -351,7 +365,7 @@ class XDMoviesProvider : MainAPI {
                 seasons = seasonsList
             )
         } else {
-            // এটি একটি মুভি, নরমাল মুভি লিস্ট হিসেবে জেনারেট করা হবে
+            // যদি রেজেক্সে S01 বা S01E01 না পাওয়া যায়, তবে এটি নরমাল মুভি
             val movieLinks = distinctItems.map { item ->
                 val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
                 Pair(formattedLabel, item.url)
