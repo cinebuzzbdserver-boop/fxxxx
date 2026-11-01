@@ -8,7 +8,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -175,7 +174,6 @@ class MovieBaazProvider : MainAPI {
         val html = fetchHtml(postUrl, "$base/")
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        // সিঙ্গেল (') এবং ডাবল (") কোট উভয়ের জন্য শক্তিশালী রেজেক্স
         val blockRegex = Regex("""class=['"]mbx-dl-q['"][^>]*>([\s\S]*?)</div>[\s\S]*?class=['"]mbx-dl-i['"][^>]*>([\s\S]*?)</div>[\s\S]*?class=['"]mbx-dl-btn['"][^>]*>[\s\S]*?href=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
 
         for (match in blockRegex.findAll(html)) {
@@ -183,14 +181,10 @@ class MovieBaazProvider : MainAPI {
             val iHtml = match.groupValues[2]
             val link = match.groupValues[3].trim()
 
-            // Quality বের করা (ex: 720p HEVC)
             val quality = qHtml.replace(Regex("<[^>]*>"), " ").replace(Regex("\\s+"), " ").trim()
-
-            // Title বের করা
             val titleMatch = Regex("""<h4[^>]*>([\s\S]*?)</h4>""", RegexOption.IGNORE_CASE).find(iHtml)
             val dlTitle = titleMatch?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
 
-            // Size বের করা (ex: 973 MB)
             val sizeMatch = Regex("""class=['"]mbx-size['"][^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE).find(iHtml)
             val size = sizeMatch?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
 
@@ -211,7 +205,6 @@ class MovieBaazProvider : MainAPI {
             }
         }
 
-        // যদি উপরের রেজেক্স মিস করে, তবে শুধু বাটন খোঁজার জন্য ফলব্যাক
         if (rawLinks.isEmpty()) {
             val fallbackBtnRegex = Regex("""<a\b[^>]*href=['"](https?://moviebaaz\.baby/links/[^'"]+)['"][^>]*>[\s\S]*?<button""", RegexOption.IGNORE_CASE)
             var count = 1
@@ -237,60 +230,48 @@ class MovieBaazProvider : MainAPI {
         try {
             val base = getBaseUrl()
             
-            // প্রথমে `/links/...` পেজ থেকে gdmax এর লিংকের HTML ফেচ করা
+            // ১. `/links/...` পেজ থেকে gdmax এর লিংকের HTML ফেচ করা
             val intermediateHtml = fetchHtml(generateUrl, "$base/")
 
-            // gdmax লিংক ও slug বের করার রেজেক্স (সিঙ্গেল/ডাবল কোট সাপোর্টেড)
-            val gdMaxRegex = Regex("""href=['"](https?://[^'"\s]*gdmax\.[^'"\s]*/file/([a-zA-Z0-9_-]+))['"]""", RegexOption.IGNORE_CASE)
+            // ২. gdmax লিংক ও slug বের করার রেজেক্স
+            val gdMaxRegex = Regex("""https?://[^'"\s>]*gdmax\.[^'"\s>]*/file/([a-zA-Z0-9_-]+)""", RegexOption.IGNORE_CASE)
             val gdMatch = gdMaxRegex.find(intermediateHtml)
-
-            var originalGdMaxUrl = gdMatch?.groupValues?.get(1)?.trim().orEmpty()
-            var fileSlug = gdMatch?.groupValues?.get(2)?.trim().orEmpty()
-
-            // যদি href দিয়ে না পাওয়া যায়, তবে সরাসরি পুরো HTML টেক্সট থেকে খোঁজার ফলব্যাক
-            if (fileSlug.isEmpty()) {
-                val fallbackGdMaxRegex = Regex("""https?://[^'"\s>]*gdmax\.[^'"\s>]*/file/([a-zA-Z0-9_-]+)""", RegexOption.IGNORE_CASE)
-                val fallbackMatch = fallbackGdMaxRegex.find(intermediateHtml)
-                originalGdMaxUrl = fallbackMatch?.value?.trim().orEmpty()
-                fileSlug = fallbackMatch?.groupValues?.get(1)?.trim().orEmpty()
-            }
+            
+            val fileSlug = gdMatch?.groupValues?.get(1)?.trim().orEmpty()
 
             if (fileSlug.isEmpty()) return@withContext null
 
-            // gofile ডোমেইনে কনভার্ট করা
+            // ৩. gdmax.xyz/gofile/slug ফরম্যাটে কনভার্ট করা
             val targetUrl = "https://gdmax.xyz/gofile/$fileSlug"
-
             val activeUa = getActiveUserAgent()
-            val gdReferer = originalGdMaxUrl.ifEmpty { "https://gdmax.org/" }
-            val gdOrigin = try {
-                val uri = URI(gdReferer)
-                "${uri.scheme}://${uri.host}"
-            } catch (_: Exception) {
-                "https://gdmax.org"
-            }
+            
+            // রেফারার হিসেবে ঠিক gdmax.xyz ব্যবহার করা (যেমনটা আপনার রিকোয়ারমেন্ট ছিল)
+            val gdReferer = "https://gdmax.xyz/"
 
             var finalStreamUrl = targetUrl
             
-            // gofile লিংকে রিকোয়েস্ট করে অরিজিনাল ভিডিও লিঙ্ক বের করা
+            // ৪. রিকোয়েস্ট করে রিডাইরেকশন ফলো করা
             val streamReq = Request.Builder()
                 .url(targetUrl)
                 .header("User-Agent", activeUa)
                 .header("Referer", gdReferer)
-                .header("Origin", gdOrigin)
-                .header("Accept", "*/*")
                 .build()
 
             baseClient.newCall(streamReq).execute().use { response ->
+                // রিডাইরেক্ট হয়ে যে লিংকে যাবে (যেমন gofile.io/d/...) সেটি কালেক্ট করা
                 finalStreamUrl = response.request.url.toString()
+            }
+
+            // ৫. যদি gofile.io তে রিডাইরেক্ট হয়ে থাকে, তবে ডোমেইন রিপ্লেস করে tg.blmbd.workers.dev বসানো
+            if (finalStreamUrl.contains("gofile.io", ignoreCase = true)) {
+                finalStreamUrl = finalStreamUrl.replace(Regex("""https?://(?:www\.)?gofile\.io""", RegexOption.IGNORE_CASE), "https://tg.blmbd.workers.dev")
             }
 
             StreamItem(
                 quality = "Direct Stream",
                 streamUrl = finalStreamUrl,
                 headers = mapOf(
-                    "User-Agent" to activeUa,
-                    "Referer" to gdReferer,
-                    "Origin" to gdOrigin
+                    "User-Agent" to activeUa
                 )
             )
         } catch (_: Throwable) {
