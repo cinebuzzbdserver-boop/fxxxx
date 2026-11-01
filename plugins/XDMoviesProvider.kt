@@ -4,6 +4,8 @@ import com.moviefy.stream.ui.screens.MainAPI
 import com.moviefy.stream.ui.screens.MediaStructure
 import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.StreamItem
+import com.moviefy.stream.ui.screens.SeasonItem
+import com.moviefy.stream.ui.screens.EpisodeItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -240,55 +242,126 @@ class XDMoviesProvider : MainAPI {
         list.distinctBy { it.url }
     }
 
+    private data class ParsedData(val title: String, val url: String, val size: String)
+
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val base = getBaseUrl()
         val html = fetchHtml(postUrl, "$base/")
-        val rawLinks = mutableListOf<Pair<String, String>>()
+        
+        val extractedItems = mutableListOf<ParsedData>()
 
-        val packBlockRegex = Regex("""<div[^>]*class=["'][^"']*pack-card[^"']*["'][^>]*>([\s\S]*?)</div>\s*</div>""", RegexOption.IGNORE_CASE)
-        val packTitleRegex = Regex("""<h4[^>]*class=["'][^"']*pack-title[^"']*["'][^>]*>([\s\S]*?)</h4>""", RegexOption.IGNORE_CASE)
-        val sizeBadgeRegex = Regex("""<span[^>]*class=["'][^"']*size-badge[^"']*["'][^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE)
-        val downloadBtnRegex = Regex("""<a\s+[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*download-button[^"']*["']""", RegexOption.IGNORE_CASE)
-
-        for (match in packBlockRegex.findAll(html)) {
-            val block = match.groupValues[1]
-
-            val rawTitle = packTitleRegex.find(block)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), "")?.trim().orEmpty()
-            val size = sizeBadgeRegex.find(block)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), "")?.trim().orEmpty()
-            val link = downloadBtnRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
-
-            if (link.isNotEmpty()) {
-                val labelBuilder = StringBuilder()
-                if (rawTitle.isNotEmpty()) {
-                    labelBuilder.append(rawTitle)
+        // Helper function to extract items safely based on classes
+        fun extractByRegex(titleClass: String) {
+            val combinedRegex = Regex(
+                """<div[^>]*class=["'][^"']*$titleClass[^"']*["'][^>]*>([\s\S]*?)</div>[\s\S]*?<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""",
+                RegexOption.IGNORE_CASE
+            )
+            for (match in combinedRegex.findAll(html)) {
+                val title = decodeHtmlEntities(match.groupValues[1].replace(Regex("<[^>]*>"), "").trim())
+                val url = match.groupValues[2].trim()
+                val size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").trim())
+                if (title.isNotEmpty() && url.isNotEmpty()) {
+                    extractedItems.add(ParsedData(title, url, size))
                 }
-                if (size.isNotEmpty()) {
-                    if (labelBuilder.isNotEmpty()) labelBuilder.append(" - ")
-                    labelBuilder.append(size)
-                }
-
-                val finalLabel = if (labelBuilder.isNotEmpty()) labelBuilder.toString() else "Download"
-                rawLinks.add(Pair(decodeHtmlEntities(finalLabel), link))
             }
         }
 
-        if (rawLinks.isEmpty()) {
-            val fallbackRegex = Regex("""<a\s+[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*download-button[^"']*["'][^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-            for (match in fallbackRegex.findAll(html)) {
-                val link = match.groupValues[1].trim()
-                val inner = match.groupValues[2].replace(Regex("<[^>]*>"), " ").replace(Regex("\\s+"), " ").trim()
-                val label = inner.ifEmpty { "Download" }
-                rawLinks.add(Pair(decodeHtmlEntities(label), link))
-            }
-        }
-
-        val distinctLinks = rawLinks.distinctBy { it.second }
-
-        MediaStructure(
-            isSeries = false,
-            rawMovieLinks = distinctLinks,
-            seasons = emptyList()
+        // ১. Series/Episodes এর জন্য (episode-title)
+        extractByRegex("episode-title")
+        
+        // ২. Movies / Netflix Versions এর জন্য (custom-title)
+        extractByRegex("custom-title")
+        
+        // ৩. পুরাতন ফর্মেট বা প্যাক কার্ডের জন্য (pack-title)
+        val packRegex = Regex(
+            """<h4[^>]*class=["'][^"']*pack-title[^"']*["'][^>]*>([\s\S]*?)</h4>[\s\S]*?<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>""",
+            RegexOption.IGNORE_CASE
         )
+        for (match in packRegex.findAll(html)) {
+            val title = decodeHtmlEntities(match.groupValues[1].replace(Regex("<[^>]*>"), "").trim())
+            val url = match.groupValues[2].trim()
+            val size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").trim())
+            if (title.isNotEmpty() && url.isNotEmpty()) {
+                extractedItems.add(ParsedData(title, url, size))
+            }
+        }
+
+        // ৪. ফলব্যাক: যদি স্পেসিফিক ক্লাস না মেলে তবে নরমাল ডাউনলোড বাটন খুঁজবে
+        if (extractedItems.isEmpty()) {
+            val fallbackRegex = Regex(
+                """<a\s+[^>]*href=["']([^"']+)["'][^>]*class=["'][^"']*(?:download-button|btn)[^"']*["'][^>]*>([\s\S]*?)</a>""",
+                RegexOption.IGNORE_CASE
+            )
+            for (match in fallbackRegex.findAll(html)) {
+                val url = match.groupValues[1].trim()
+                val innerText = decodeHtmlEntities(match.groupValues[2].replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), " ").trim())
+                val title = innerText.ifEmpty { "Download" }
+                if (url.isNotEmpty()) {
+                    extractedItems.add(ParsedData(title, url, ""))
+                }
+            }
+        }
+
+        // ডুপ্লিকেট লিংক বাদ দেওয়া
+        val distinctItems = extractedItems.distinctBy { it.url }
+
+        // S..E.. প্যাটার্ন চেক করা (যেমন: S01E05 বা S4E01)
+        val seasonEpisodeRegex = Regex("""[Ss](\d+)[Ee](\d+)""")
+        val isSeriesPost = distinctItems.any { seasonEpisodeRegex.containsMatchIn(it.title) }
+
+        if (isSeriesPost) {
+            // এটি একটি সিরিজ, সিজন ও এপিসোড অনুযায়ী আলাদা করা হবে
+            val seasonMap = mutableMapOf<Int, MutableMap<Int, MutableList<Pair<String, String>>>>()
+
+            distinctItems.forEach { item ->
+                val match = seasonEpisodeRegex.find(item.title)
+                if (match != null) {
+                    val sNum = match.groupValues[1].toIntOrNull() ?: 1
+                    val eNum = match.groupValues[2].toIntOrNull() ?: 1
+                    
+                    val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
+                    
+                    seasonMap.getOrPut(sNum) { mutableMapOf() }
+                        .getOrPut(eNum) { mutableListOf() }
+                        .add(Pair(formattedLabel, item.url))
+                } else {
+                    // যদি সিরিজের পেজে কোনো এক্সট্রা ফাইল বা ওএসটি (OST) থাকে, সেটি Season 0 (Extras) তে যাবে
+                    val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
+                    seasonMap.getOrPut(0) { mutableMapOf() }
+                        .getOrPut(0) { mutableListOf() }
+                        .add(Pair(formattedLabel, item.url))
+                }
+            }
+
+            val seasonsList = mutableListOf<SeasonItem>()
+            seasonMap.toSortedMap().forEach { (sNum, epMap) ->
+                val seasonName = if (sNum == 0) "Extras / Other Files" else "Season $sNum"
+                val episodesList = mutableListOf<EpisodeItem>()
+                
+                epMap.toSortedMap().forEach { (eNum, links) ->
+                    val epName = if (eNum == 0) "Extra File" else "Episode %02d".format(eNum)
+                    episodesList.add(EpisodeItem(name = epName, rawGenerateLinks = links))
+                }
+                seasonsList.add(SeasonItem(name = seasonName, episodes = episodesList))
+            }
+
+            return@withContext MediaStructure(
+                isSeries = true,
+                rawMovieLinks = emptyList(),
+                seasons = seasonsList
+            )
+        } else {
+            // এটি একটি মুভি, নরমাল মুভি লিস্ট হিসেবে জেনারেট করা হবে
+            val movieLinks = distinctItems.map { item ->
+                val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
+                Pair(formattedLabel, item.url)
+            }
+            return@withContext MediaStructure(
+                isSeries = false,
+                rawMovieLinks = movieLinks,
+                seasons = emptyList()
+            )
+        }
     }
 
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
