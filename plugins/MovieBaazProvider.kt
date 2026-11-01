@@ -89,7 +89,7 @@ class MovieBaazProvider : MainAPI {
             return "https://image.tmdb.org/t/p/original/$fileName"
         }
 
-        val imgSrcRegex = Regex("""<img\b[^>]*?\bsrc=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val imgSrcRegex = Regex("""<img\b[^>]*?\bsrc=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
         val srcMatch = imgSrcRegex.find(cardHtml)?.groupValues?.get(1)?.trim().orEmpty()
 
         if (srcMatch.isNotEmpty() &&
@@ -105,9 +105,9 @@ class MovieBaazProvider : MainAPI {
     private fun parseMovieGrid(html: String, base: String): List<MovieItem> {
         val list = mutableListOf<MovieItem>()
 
-        val articleRegex = Regex("""<article\b[^>]*class=["'][^"']*mbx-c[^"']*["'][^>]*>([\s\S]*?)</article>""", RegexOption.IGNORE_CASE)
-        val linkRegex = Regex("""<a\b[^>]*class=["'][^"']*mbx-c-p[^"']*["'][^>]*href=["']([^"']+)["'][^>]*title=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-        val fallbackLinkRegex = Regex("""<h3>\s*<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>\s*</h3>""", RegexOption.IGNORE_CASE)
+        val articleRegex = Regex("""<article\b[^>]*class=['"][^'"]*mbx-c[^'"]*['"][^>]*>([\s\S]*?)</article>""", RegexOption.IGNORE_CASE)
+        val linkRegex = Regex("""<a\b[^>]*class=['"][^'"]*mbx-c-p[^'"]*['"][^>]*href=['"]([^'"]+)['"][^>]*title=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+        val fallbackLinkRegex = Regex("""<h3>\s*<a\b[^>]*href=['"]([^'"]+)['"][^>]*>([\s\S]*?)</a>\s*</h3>""", RegexOption.IGNORE_CASE)
 
         for (match in articleRegex.findAll(html)) {
             val cardHtml = match.groupValues[1]
@@ -175,19 +175,24 @@ class MovieBaazProvider : MainAPI {
         val html = fetchHtml(postUrl, "$base/")
         val rawLinks = mutableListOf<Pair<String, String>>()
 
-        val dlBlockRegex = Regex("""<div\b[^>]*class=["'][^"']*mbx-dl[^"']*["'][^>]*>([\s\S]*?)</div>\s*</div>""", RegexOption.IGNORE_CASE)
-        val qualityRegex = Regex("""<div\b[^>]*class=["'][^"']*mbx-dl-q[^"']*["'][^>]*>([\s\S]*?)</div>""", RegexOption.IGNORE_CASE)
-        val titleRegex = Regex("""<div\b[^>]*class=["'][^"']*mbx-dl-i[^"']*["'][\s\S]*?<h4>([\s\S]*?)</h4>""", RegexOption.IGNORE_CASE)
-        val sizeRegex = Regex("""<span\b[^>]*class=["'][^"']*mbx-size[^"']*["'][^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE)
-        val btnRegex = Regex("""<div\b[^>]*class=["'][^"']*mbx-dl-btn[^"']*["'][\s\S]*?<a\b[^>]*href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        // সিঙ্গেল (') এবং ডাবল (") কোট উভয়ের জন্য শক্তিশালী রেজেক্স
+        val blockRegex = Regex("""class=['"]mbx-dl-q['"][^>]*>([\s\S]*?)</div>[\s\S]*?class=['"]mbx-dl-i['"][^>]*>([\s\S]*?)</div>[\s\S]*?class=['"]mbx-dl-btn['"][^>]*>[\s\S]*?href=['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
 
-        for (match in dlBlockRegex.findAll(html)) {
-            val block = match.groupValues[1]
+        for (match in blockRegex.findAll(html)) {
+            val qHtml = match.groupValues[1]
+            val iHtml = match.groupValues[2]
+            val link = match.groupValues[3].trim()
 
-            val quality = qualityRegex.find(block)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
-            val dlTitle = titleRegex.find(block)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
-            val size = sizeRegex.find(block)?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
-            val link = btnRegex.find(block)?.groupValues?.get(1)?.trim().orEmpty()
+            // Quality বের করা (ex: 720p HEVC)
+            val quality = qHtml.replace(Regex("<[^>]*>"), " ").replace(Regex("\\s+"), " ").trim()
+
+            // Title বের করা
+            val titleMatch = Regex("""<h4[^>]*>([\s\S]*?)</h4>""", RegexOption.IGNORE_CASE).find(iHtml)
+            val dlTitle = titleMatch?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
+
+            // Size বের করা (ex: 973 MB)
+            val sizeMatch = Regex("""class=['"]mbx-size['"][^>]*>([\s\S]*?)</span>""", RegexOption.IGNORE_CASE).find(iHtml)
+            val size = sizeMatch?.groupValues?.get(1)?.replace(Regex("<[^>]*>"), " ")?.trim()?.replace(Regex("\\s+"), " ").orEmpty()
 
             if (link.isNotEmpty()) {
                 val labelBuilder = StringBuilder()
@@ -206,6 +211,17 @@ class MovieBaazProvider : MainAPI {
             }
         }
 
+        // যদি উপরের রেজেক্স মিস করে, তবে শুধু বাটন খোঁজার জন্য ফলব্যাক
+        if (rawLinks.isEmpty()) {
+            val fallbackBtnRegex = Regex("""<a\b[^>]*href=['"](https?://moviebaaz\.baby/links/[^'"]+)['"][^>]*>[\s\S]*?<button""", RegexOption.IGNORE_CASE)
+            var count = 1
+            for (match in fallbackBtnRegex.findAll(html)) {
+                val link = match.groupValues[1].trim()
+                rawLinks.add(Pair("Download Link $count", link))
+                count++
+            }
+        }
+
         val isSeries = postUrl.contains("/tvshows/", ignoreCase = true) || html.contains("mbx-k-series", ignoreCase = true)
 
         MediaStructure(
@@ -220,22 +236,30 @@ class MovieBaazProvider : MainAPI {
 
         try {
             val base = getBaseUrl()
+            
+            // প্রথমে `/links/...` পেজ থেকে gdmax এর লিংকের HTML ফেচ করা
             val intermediateHtml = fetchHtml(generateUrl, "$base/")
 
-            // লিঙ্ক পেজ থেকে gdmax লিঙ্ক এবং slug এক্সট্রাক্ট করা
-            val gdMaxRegex = Regex("""https?://[^"'\s]*gdmax\.[^"'\s]*/file/([a-zA-Z0-9_-]+)""", RegexOption.IGNORE_CASE)
+            // gdmax লিংক ও slug বের করার রেজেক্স (সিঙ্গেল/ডাবল কোট সাপোর্টেড)
+            val gdMaxRegex = Regex("""href=['"](https?://[^'"\s]*gdmax\.[^'"\s]*/file/([a-zA-Z0-9_-]+))['"]""", RegexOption.IGNORE_CASE)
             val gdMatch = gdMaxRegex.find(intermediateHtml)
 
-            val originalGdMaxUrl = gdMatch?.value?.trim().orEmpty()
-            val fileSlug = gdMatch?.groupValues?.get(1)?.trim().orEmpty()
+            var originalGdMaxUrl = gdMatch?.groupValues?.get(1)?.trim().orEmpty()
+            var fileSlug = gdMatch?.groupValues?.get(2)?.trim().orEmpty()
 
-            val targetUrl = if (fileSlug.isNotEmpty()) {
-                "https://gdmax.xyz/gofile/$fileSlug"
-            } else {
-                generateUrl
+            // যদি href দিয়ে না পাওয়া যায়, তবে সরাসরি পুরো HTML টেক্সট থেকে খোঁজার ফলব্যাক
+            if (fileSlug.isEmpty()) {
+                val fallbackGdMaxRegex = Regex("""https?://[^'"\s>]*gdmax\.[^'"\s>]*/file/([a-zA-Z0-9_-]+)""", RegexOption.IGNORE_CASE)
+                val fallbackMatch = fallbackGdMaxRegex.find(intermediateHtml)
+                originalGdMaxUrl = fallbackMatch?.value?.trim().orEmpty()
+                fileSlug = fallbackMatch?.groupValues?.get(1)?.trim().orEmpty()
             }
 
-            // gdmax লিঙ্ক থেকে Referer ও Origin সেট করা
+            if (fileSlug.isEmpty()) return@withContext null
+
+            // gofile ডোমেইনে কনভার্ট করা
+            val targetUrl = "https://gdmax.xyz/gofile/$fileSlug"
+
             val activeUa = getActiveUserAgent()
             val gdReferer = originalGdMaxUrl.ifEmpty { "https://gdmax.org/" }
             val gdOrigin = try {
@@ -246,6 +270,8 @@ class MovieBaazProvider : MainAPI {
             }
 
             var finalStreamUrl = targetUrl
+            
+            // gofile লিংকে রিকোয়েস্ট করে অরিজিনাল ভিডিও লিঙ্ক বের করা
             val streamReq = Request.Builder()
                 .url(targetUrl)
                 .header("User-Agent", activeUa)
@@ -254,7 +280,6 @@ class MovieBaazProvider : MainAPI {
                 .header("Accept", "*/*")
                 .build()
 
-            // রিডাইরেকশন ফলো করে আসল সরাসরি প্লেযোগ্য ভিডিও লিঙ্ক বের করা
             baseClient.newCall(streamReq).execute().use { response ->
                 finalStreamUrl = response.request.url.toString()
             }
