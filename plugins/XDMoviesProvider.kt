@@ -30,7 +30,7 @@ class XDMoviesProvider : MainAPI {
     override var name = "XDMovies"
     override var mainUrl = "https://huh.xdmovies.wtf"
 
-    private val userAgent = "Mozilla/5.0 (Linux; Android 16; 23090RA98I Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.8059.43 Mobile Safari/537.36"
+    private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
     private val resolveMutex = Mutex()
 
@@ -270,12 +270,10 @@ class XDMoviesProvider : MainAPI {
             for (match in combinedRegex.findAll(html)) {
                 val title = decodeHtmlEntities(match.groupValues[1].replace(Regex("<[^>]*>"), "").trim())
                 val url = match.groupValues[2].trim()
-
                 var size = decodeHtmlEntities(match.groupValues[3].replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), " ").trim())
                 if (size.equals("Download", ignoreCase = true)) {
                     size = ""
                 }
-
                 if (title.isNotEmpty() && url.isNotEmpty()) {
                     extractedItems.add(ParsedData(title, url, size))
                 }
@@ -310,16 +308,13 @@ class XDMoviesProvider : MainAPI {
 
         if (isSeriesPost) {
             val seasonCategoryMap = mutableMapOf<String, MutableMap<String, MutableList<Pair<String, String>>>>()
-
             distinctItems.forEach { item ->
                 val match = seriesRegex.find(item.title)
                 val seasonName: String
                 val epShortName: String
-
                 if (match != null) {
                     val sNum = match.groupValues[1].toIntOrNull() ?: 1
                     val eStr = match.groupValues[2]
-
                     if (eStr.isEmpty()) {
                         seasonName = "Season $sNum Packs/Zips"
                         epShortName = "S%02d".format(sNum)
@@ -332,9 +327,7 @@ class XDMoviesProvider : MainAPI {
                     seasonName = "Extras / Other Files"
                     epShortName = item.title
                 }
-
                 val linkLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
-
                 seasonCategoryMap.getOrPut(seasonName) { mutableMapOf() }
                     .getOrPut(epShortName) { mutableListOf() }
                     .add(Pair(linkLabel, item.url))
@@ -357,38 +350,23 @@ class XDMoviesProvider : MainAPI {
                 }
                 SeasonItem(name = sName, episodes = episodesList)
             }
-
-            MediaStructure(
-                isSeries = true,
-                rawMovieLinks = emptyList(),
-                seasons = seasonsList
-            )
+            return@withContext MediaStructure(isSeries = true, rawMovieLinks = emptyList(), seasons = seasonsList)
         } else {
             val movieLinks = distinctItems.map { item ->
                 val formattedLabel = if (item.size.isNotEmpty()) "${item.title} - ${item.size}" else item.title
                 Pair(formattedLabel, item.url)
             }
-            MediaStructure(
-                isSeries = false,
-                rawMovieLinks = movieLinks,
-                seasons = emptyList()
-            )
+            return@withContext MediaStructure(isSeries = false, rawMovieLinks = movieLinks, seasons = emptyList())
         }
     }
 
+    // ==========================================
+    // Turnstile & Redirection Helper Functions
+    // ==========================================
+
     private fun extractTurnstileSiteKey(html: String): String? {
-        val patterns = listOf(
-            Regex("""sitekey\s*:\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""turnstile\.render\s*\([^,]+,\s*\{[\s\S]*?sitekey\s*:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE),
-            Regex("""['"](0x4[a-zA-Z0-9_-]{10,})['"]""")
-        )
-        for (regex in patterns) {
-            val match = regex.find(html)
-            val key = match?.groupValues?.get(1)?.trim()
-            if (!key.isNullOrEmpty()) return key
-        }
-        return null
+        val regex = Regex("""data-sitekey\s*=\s*['"](0x[a-zA-Z0-9_-]+)['"]""", RegexOption.IGNORE_CASE)
+        return regex.find(html)?.groupValues?.get(1)?.trim()
     }
 
     private fun extractClientSideRedirect(html: String, currentUrl: String): String? {
@@ -440,19 +418,23 @@ class XDMoviesProvider : MainAPI {
         return null
     }
 
+    // ==========================================
+    // Final Link Resolver Module
+    // ==========================================
+
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
         val trimmed = generateUrl.trim()
         if (trimmed.isBlank()) return@withContext null
 
-        // কন্টেন্ট পেজে সরাসরি HubCloud থাকলে সরাসরি রিটার্ন
+        val activeUa = getActiveUserAgent()
+        val baseDomain = getBaseUrl()
+
+        // ১. যদি লিংকটি সরাসরি HubCloud এর হয়, তবে সাথে সাথে রিটার্ন করা
         if (trimmed.contains("hubcloud", ignoreCase = true)) {
             return@withContext StreamItem(
                 quality = "HubCloud Stream",
                 streamUrl = trimmed,
-                headers = mapOf(
-                    "User-Agent" to getActiveUserAgent(),
-                    "Referer" to "${getBaseUrl()}/"
-                )
+                headers = mapOf("User-Agent" to activeUa, "Referer" to "$baseDomain/")
             )
         }
 
@@ -487,130 +469,137 @@ class XDMoviesProvider : MainAPI {
                 .build()
 
             try {
-                val activeUa = getActiveUserAgent()
-                var currentUrl = trimmed
+                // ধাপ ১: Gateway Page Fetch করা (যেখানে Turnstile থাকে)
+                val initialReq = Request.Builder()
+                    .url(trimmed)
+                    .header("User-Agent", activeUa)
+                    .header("Referer", "$baseDomain/")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .build()
+
                 var pageHtml = ""
-                var refererUrl = "${getBaseUrl()}/"
+                var gatewayUrl = trimmed
 
-                // ধাপ ১: ইনিশিয়াল শর্টেনার লিঙ্ক ফলো করে টার্নস্টাইল পেজ পর্যন্ত পৌঁছানো
-                for (step in 0 until 5) {
-                    val req = Request.Builder()
-                        .url(currentUrl)
-                        .header("User-Agent", activeUa)
-                        .header("Referer", refererUrl)
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                        .build()
-
-                    sessionClient.newCall(req).execute().use { resp ->
-                        currentUrl = resp.request.url.toString()
-                        pageHtml = resp.body?.string().orEmpty()
-                    }
-
-                    // যদি কোনো পর্যায়ে HubCloud সরাসরি মিলে যায়
-                    val hubMatch = Regex("""https?://[a-zA-Z0-9.-]*hubcloud\.[a-zA-Z]{2,}/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(pageHtml)?.value
-                    if (!hubMatch.isNullOrEmpty()) {
-                        return@withLock StreamItem(
-                            quality = "HubCloud Stream",
-                            streamUrl = hubMatch,
-                            headers = mapOf("User-Agent" to activeUa, "Referer" to currentUrl)
-                        )
-                    }
-
-                    if (pageHtml.contains("turnstile", ignoreCase = true) || pageHtml.contains("cf-turnstile", ignoreCase = true)) {
-                        break
-                    }
-
-                    val nextRedirect = extractClientSideRedirect(pageHtml, currentUrl)
-                    if (!nextRedirect.isNullOrEmpty() && nextRedirect != currentUrl) {
-                        refererUrl = currentUrl
-                        currentUrl = nextRedirect
-                    } else {
-                        break
-                    }
+                sessionClient.newCall(initialReq).execute().use { resp ->
+                    gatewayUrl = resp.request.url.toString()
+                    pageHtml = resp.body?.string().orEmpty()
                 }
 
-                val currentUri = URI(currentUrl)
-                val currentOrigin = "${currentUri.scheme}://${currentUri.host}"
+                // লোকাল ভেরিয়েবলে রেখে দেওয়া (Smart cast error এড়ানোর জন্য)
+                val safeGatewayUrl = gatewayUrl 
+                val currentUri = URI(safeGatewayUrl)
+                val gatewayOrigin = "${currentUri.scheme}://${currentUri.host}"
 
-                // পেজ থেকে টার্নস্টাইল সাইট কি সংগ্রহ করা
+                // পেজের ভেতরেই যদি HubCloud থাকে তবে রিটার্ন 
+                val hubRegex = Regex("""https?://[a-zA-Z0-9.-]*hubcloud\.[a-zA-Z]{2,}/[^\s"'<>]+""", RegexOption.IGNORE_CASE)
+                val hubMatch = hubRegex.find(pageHtml)?.value
+                if (!hubMatch.isNullOrEmpty()) {
+                    return@withLock StreamItem(
+                        quality = "HubCloud Stream", 
+                        streamUrl = hubMatch, 
+                        headers = mapOf("User-Agent" to activeUa, "Referer" to safeGatewayUrl)
+                    )
+                }
+
+                // ধাপ ২: Turnstile SiteKey এক্সট্র্যাক্ট করা
                 val siteKey = extractTurnstileSiteKey(pageHtml) ?: "0x4AAAAAACwMJhFoINTv6AGb"
 
-                // ধাপ ২: Turnstile টোকেন সলভ করা
-                val cfToken = requestTurnstileToken(siteKey, currentOrigin)
+                // ধাপ ৩: Turnstile Bridge ব্যবহার করে টোকেন সলভ করা
+                val cfToken = requestTurnstileToken(siteKey, gatewayOrigin)
                 if (cfToken.isNullOrBlank()) {
                     return@withLock null
                 }
 
-                // ধাপ ৩: ক্যাপচা টোকেন দিয়ে গেটওয়ে ভেরিফিকেশন কল করা
-                // সাধারণত এটি ফর্ম POST বা ভেরিফিকেশন এন্ডপয়েন্টে পাঠানো হয়
+                // ধাপ ৪: টোকেন দিয়ে POST রিকোয়েস্ট পাঠানো
                 val formBody = "cf-turnstile-response=${URLEncoder.encode(cfToken, "UTF-8")}"
-                val verifyUrl = if (pageHtml.contains("/api/verify", ignoreCase = true)) {
-                    "$currentOrigin/api/verify"
-                } else {
-                    currentUrl
-                }
-
                 val postReq = Request.Builder()
-                    .url(verifyUrl)
+                    .url(safeGatewayUrl) // সাধারণত একই URL এ ফর্ম সাবমিট হয়
                     .post(formBody.toRequestBody("application/x-www-form-urlencoded".toMediaType()))
                     .header("User-Agent", activeUa)
-                    .header("Referer", currentUrl)
-                    .header("Origin", currentOrigin)
-                    .header("Accept", "application/json, text/html, */*")
-                    .header("X-Requested-With", "XMLHttpRequest")
+                    .header("Referer", safeGatewayUrl)
+                    .header("Origin", gatewayOrigin)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
                     .build()
 
                 var postResultHtml = ""
+                var postResponseUrl = safeGatewayUrl
+
                 sessionClient.newCall(postReq).execute().use { resp ->
-                    currentUrl = resp.request.url.toString()
+                    postResponseUrl = resp.request.url.toString()
                     postResultHtml = resp.body?.string().orEmpty()
                 }
+                
+                val safePostResponseUrl = postResponseUrl // Smart cast safe string
 
-                // রেসপন্স থেকে ফাইনাল রিডাইরেক্ট বা "latestnewsonline" টাইপ URL খোঁজা
+                // POST এর রেসপন্সে যদি সরাসরি HubCloud এ রিডাইরেক্ট হয়ে যায়
+                if (safePostResponseUrl.contains("hubcloud", ignoreCase = true)) {
+                    return@withLock StreamItem(
+                        quality = "HubCloud Stream", 
+                        streamUrl = safePostResponseUrl, 
+                        headers = mapOf("User-Agent" to activeUa, "Referer" to safeGatewayUrl)
+                    )
+                }
+
+                // ধাপ ৫: POST রেসপন্স থেকে go/download লিংক এক্সট্র্যাক্ট করা (e.g. latestnewsonline.sbs)
                 val goLinkRegex = Regex("""https?://[^\s"'<>]+/(?:go|download)/[a-zA-Z0-9\-_?=&.]+""", RegexOption.IGNORE_CASE)
-                val targetNextUrl = goLinkRegex.find(postResultHtml)?.value ?: extractClientSideRedirect(postResultHtml, currentUrl)
+                var nextTargetUrl = goLinkRegex.find(postResultHtml)?.value ?: extractClientSideRedirect(postResultHtml, safePostResponseUrl)
 
-                if (!targetNextUrl.isNullOrEmpty()) {
-                    // ধাপ ৪: অন্তর্বর্তীকালীন রিডাইরেক্ট লিঙ্কটি এক্সিকিউট করে HubCloud উদ্ধার করা
+                // JSON ফরম্যাটে রেসপন্স আসলে
+                if (nextTargetUrl.isNullOrEmpty() && postResultHtml.trim().startsWith("{")) {
+                    try {
+                        val json = JSONObject(postResultHtml)
+                        val urlFromJson = json.optString("url", "").trim()
+                        if (urlFromJson.isNotEmpty()) nextTargetUrl = urlFromJson
+                    } catch (_: Exception) {}
+                }
+
+                // ধাপ ৬: ফাইনাল ইন্টারমিডিয়েট লিংকে ভিজিট করে অরিজিনাল HubCloud বের করা
+                if (!nextTargetUrl.isNullOrEmpty()) {
+                    val safeNextTarget = nextTargetUrl ?: "" 
+                    
                     val finalReq = Request.Builder()
-                        .url(targetNextUrl)
+                        .url(safeNextTarget)
                         .header("User-Agent", activeUa)
-                        .header("Referer", currentUrl)
-                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Referer", safePostResponseUrl)
                         .build()
 
                     var finalPageHtml = ""
-                    var finalUrl = targetNextUrl
+                    var finalEndUrl = safeNextTarget
+
                     sessionClient.newCall(finalReq).execute().use { fResp ->
-                        finalUrl = fResp.request.url.toString()
+                        finalEndUrl = fResp.request.url.toString()
                         finalPageHtml = fResp.body?.string().orEmpty()
                     }
+                    
+                    val safeFinalEndUrl = finalEndUrl
 
-                    if (finalUrl.contains("hubcloud", ignoreCase = true)) {
+                    // যদি URL টাই Hubcloud এ পৌঁছে যায়
+                    if (safeFinalEndUrl.contains("hubcloud", ignoreCase = true)) {
                         return@withLock StreamItem(
                             quality = "HubCloud Stream",
-                            streamUrl = finalUrl,
-                            headers = mapOf("User-Agent" to activeUa, "Referer" to targetNextUrl)
+                            streamUrl = safeFinalEndUrl,
+                            headers = mapOf("User-Agent" to activeUa, "Referer" to safeNextTarget)
                         )
                     }
 
-                    val finalHubMatch = Regex("""https?://[a-zA-Z0-9.-]*hubcloud\.[a-zA-Z]{2,}/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(finalPageHtml)?.value
+                    // অথবা পেজের ভেতরে Hubcloud লিংক থাকে
+                    val finalHubMatch = hubRegex.find(finalPageHtml)?.value
                     if (!finalHubMatch.isNullOrEmpty()) {
                         return@withLock StreamItem(
                             quality = "HubCloud Stream",
                             streamUrl = finalHubMatch,
-                            headers = mapOf("User-Agent" to activeUa, "Referer" to finalUrl)
+                            headers = mapOf("User-Agent" to activeUa, "Referer" to safeFinalEndUrl)
                         )
                     }
                 }
 
-                // যদি পেজের ভেতরেই কোথাও ক্লাউড স্ট্রিমিং লিঙ্ক রিটার্ন করে থাকে
-                val fallbackHub = Regex("""https?://[a-zA-Z0-9.-]*hubcloud\.[a-zA-Z]{2,}/[^\s"'<>]+""", RegexOption.IGNORE_CASE).find(postResultHtml)?.value
+                // সর্বশেষ ফলব্যাক হিসেবে POST রেসপন্স পেজের ভেতর HubCloud খুঁজবে
+                val fallbackHub = hubRegex.find(postResultHtml)?.value
                 if (!fallbackHub.isNullOrEmpty()) {
                     return@withLock StreamItem(
                         quality = "HubCloud Stream",
                         streamUrl = fallbackHub,
-                        headers = mapOf("User-Agent" to activeUa, "Referer" to currentUrl)
+                        headers = mapOf("User-Agent" to activeUa, "Referer" to safePostResponseUrl)
                     )
                 }
 
