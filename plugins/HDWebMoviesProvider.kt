@@ -40,7 +40,7 @@ class HDWebMoviesProvider : MainAPI {
 
     private fun getBaseUrl(): String {
         val clean = mainUrl.trim().trimEnd('/')
-        return if (clean.isEmpty()) "https://ww1.hdwebmovies.pics" else clean
+        return if (clean.isEmpty()) "https://ww2.hdwebmovies.pics" else clean
     }
 
     private suspend fun fetchHtml(url: String, referer: String? = null): String = withContext(Dispatchers.IO) {
