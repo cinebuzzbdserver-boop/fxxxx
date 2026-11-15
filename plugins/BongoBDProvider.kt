@@ -108,6 +108,10 @@ class BongoBDProvider : MainAPI {
                     val item = jsonArray.getJSONObject(i)
                     val id = item.optString("id") 
                     val title = item.optString("title")
+                    val contentType = item.optString("contentType")
+
+                    // Exclude root PROGRAM items and Trailers from main page list too just in case
+                    if (contentType == "PROGRAM" || title.contains("Trailer", ignoreCase = true)) continue
 
                     var imageUrl = ""
                     val imagesArr = item.optJSONArray("images")
@@ -192,9 +196,9 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Series Handle Update with Smart Slug Fallback)
+    // 4. Load Media Structure (Series Handle Update with Ignore Logic)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        val contentId = postUrl // Here postUrl is the 'id'
+        val contentId = postUrl 
         
         try {
             val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
@@ -205,10 +209,8 @@ class BongoBDProvider : MainAPI {
                 val contentType = json.optString("content_type", "")
                 val originalSlug = json.optString("slug", "")
 
-                // Check if it is a Series / TV Show (PROGRAM)
                 if (contentType == "PROGRAM" && originalSlug.isNotEmpty()) {
                     
-                    // Helper function to fetch episodes by slug
                     fun fetchWidgetItems(slugToTry: String): JSONArray {
                         val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slugToTry?limit=100&offset=0"
                         val widgetResp = fetchApiSync(widgetUrl)
@@ -220,15 +222,12 @@ class BongoBDProvider : MainAPI {
                         return JSONArray()
                     }
 
-                    // Attempt 1: Using Original Slug
                     var items = fetchWidgetItems(originalSlug)
 
-                    // Attempt 2: Fallback to Title based Slug (if attempt 1 is empty)
                     if (items.length() == 0) {
                         val titleObj = json.optJSONObject("title")
                         val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
                         
-                        // Convert title to slug (e.g. "Sultan Salahuddin Ayyubi" -> "sultan-salahuddin-ayyubi")
                         val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
                         
                         if (titleSlug.isNotEmpty() && titleSlug != originalSlug) {
@@ -236,16 +235,13 @@ class BongoBDProvider : MainAPI {
                         }
                     }
 
-                    // Attempt 3: Fallback by cutting off the random hash suffix (if attempt 2 is still empty)
                     if (items.length() == 0) {
-                        // Removes standard hash from end (e.g., "-d23795b634c3")
                         val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
                         if (strippedSlug != originalSlug) {
                             items = fetchWidgetItems(strippedSlug)
                         }
                     }
 
-                    // If finally we got the episodes, process them
                     if (items.length() > 0) {
                         val seasonMap = linkedMapOf<String, MutableList<EpisodeItem>>()
                         
@@ -253,9 +249,14 @@ class BongoBDProvider : MainAPI {
                             val epItem = items.getJSONObject(i)
                             val epId = epItem.optString("id")
                             val epTitle = epItem.optString("title")
+                            val epContentType = epItem.optString("contentType")
+
+                            // IGNORE LOGIC: Skip PROGRAM types (like root series links) and Trailers
+                            if (epContentType == "PROGRAM" || epTitle.contains("Trailer", ignoreCase = true)) {
+                                continue
+                            }
                             
                             if (epId.isNotEmpty()) {
-                                // Extract Season from title (e.g., "S1 E1" -> "S1")
                                 val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(epTitle)
                                 val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
                                 
@@ -282,7 +283,7 @@ class BongoBDProvider : MainAPI {
             e.printStackTrace()
         }
 
-        // Fallback for Single Movie or if Series logic completely fails
+        // Fallback for Single Movie
         return@withContext MediaStructure(
             isSeries = false,
             rawMovieLinks = listOf(Pair("HD", postUrl)),
@@ -292,7 +293,7 @@ class BongoBDProvider : MainAPI {
 
     // 5. Resolve Direct HLS Link
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
-        val contentId = generateUrl // The Episode ID or Movie ID
+        val contentId = generateUrl
         val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
 
         val responseBody = fetchApiSync(targetUrl)
