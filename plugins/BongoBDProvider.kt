@@ -90,7 +90,7 @@ class BongoBDProvider : MainAPI {
         }
     }
 
-    // 2. Fetch Item List (Bachelor Point Season 5 as per logic)
+    // 2. Fetch Item List
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val limit = 100
         val offset = if (page <= 1) 0 else (page - 1) * limit
@@ -192,30 +192,61 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Series Handle Update)
+    // 4. Load Media Structure (Series Handle Update with Smart Slug Fallback)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl // Here postUrl is the 'id'
         
         try {
-            // First check what type of content this is
             val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
             val responseBody = fetchApiSync(targetUrl)
             
             if (responseBody.isNotEmpty()) {
                 val json = JSONObject(responseBody)
                 val contentType = json.optString("content_type", "")
-                val slug = json.optString("slug", "")
+                val originalSlug = json.optString("slug", "")
 
                 // Check if it is a Series / TV Show (PROGRAM)
-                if (contentType == "PROGRAM" && slug.isNotEmpty()) {
-                    // Fetch episodes using slug
-                    val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slug?limit=100&offset=0"
-                    val widgetResp = fetchApiSync(widgetUrl)
+                if (contentType == "PROGRAM" && originalSlug.isNotEmpty()) {
                     
-                    if (widgetResp.isNotEmpty()) {
-                        val widgetJson = JSONObject(widgetResp)
-                        val items = widgetJson.optJSONArray("items") ?: JSONArray()
+                    // Helper function to fetch episodes by slug
+                    fun fetchWidgetItems(slugToTry: String): JSONArray {
+                        val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slugToTry?limit=100&offset=0"
+                        val widgetResp = fetchApiSync(widgetUrl)
+                        if (widgetResp.isNotEmpty()) {
+                            try {
+                                return JSONObject(widgetResp).optJSONArray("items") ?: JSONArray()
+                            } catch (e: Exception) {}
+                        }
+                        return JSONArray()
+                    }
+
+                    // Attempt 1: Using Original Slug
+                    var items = fetchWidgetItems(originalSlug)
+
+                    // Attempt 2: Fallback to Title based Slug (if attempt 1 is empty)
+                    if (items.length() == 0) {
+                        val titleObj = json.optJSONObject("title")
+                        val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
                         
+                        // Convert title to slug (e.g. "Sultan Salahuddin Ayyubi" -> "sultan-salahuddin-ayyubi")
+                        val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+                        
+                        if (titleSlug.isNotEmpty() && titleSlug != originalSlug) {
+                            items = fetchWidgetItems(titleSlug)
+                        }
+                    }
+
+                    // Attempt 3: Fallback by cutting off the random hash suffix (if attempt 2 is still empty)
+                    if (items.length() == 0) {
+                        // Removes standard hash from end (e.g., "-d23795b634c3")
+                        val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
+                        if (strippedSlug != originalSlug) {
+                            items = fetchWidgetItems(strippedSlug)
+                        }
+                    }
+
+                    // If finally we got the episodes, process them
+                    if (items.length() > 0) {
                         val seasonMap = linkedMapOf<String, MutableList<EpisodeItem>>()
                         
                         for (i in 0 until items.length()) {
@@ -251,7 +282,7 @@ class BongoBDProvider : MainAPI {
             e.printStackTrace()
         }
 
-        // Fallback for Single Movie or if Series logic fails
+        // Fallback for Single Movie or if Series logic completely fails
         return@withContext MediaStructure(
             isSeries = false,
             rawMovieLinks = listOf(Pair("HD", postUrl)),
