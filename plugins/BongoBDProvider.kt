@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -105,10 +106,9 @@ class BongoBDProvider : MainAPI {
 
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
-                    val id = item.optString("id") // Content ID
+                    val id = item.optString("id") 
                     val title = item.optString("title")
 
-                    // Extract THUMB_PORTRAIT image
                     var imageUrl = ""
                     val imagesArr = item.optJSONArray("images")
                     if (imagesArr != null) {
@@ -126,7 +126,7 @@ class BongoBDProvider : MainAPI {
                             MovieItem(
                                 title = title,
                                 image = imageUrl,
-                                url = id, // Storing ID in url so it passes to loadMediaStructure
+                                url = id, 
                                 isPoster = true,
                                 referer = "$mainUrl/"
                             )
@@ -140,13 +140,12 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 3. Search Logic Added Here
+    // 3. Search Logic
     override suspend fun search(query: String, page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val limit = 20
         val offset = if (page <= 1) 0 else (page - 1) * limit
         val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
         
-        // Search API url
         val targetUrl = "https://api.bongo-solutions.com/spiderman/api/v1/search?q=$encodedQuery&offset=$offset&limit=$limit"
 
         val responseBody = fetchApiSync(targetUrl)
@@ -159,10 +158,9 @@ class BongoBDProvider : MainAPI {
 
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
-                    val id = item.optString("id") // Content ID
+                    val id = item.optString("id") 
                     val title = item.optString("title")
 
-                    // Extract THUMB_PORTRAIT image
                     var imageUrl = ""
                     val imagesArr = item.optJSONArray("images")
                     if (imagesArr != null) {
@@ -180,7 +178,7 @@ class BongoBDProvider : MainAPI {
                             MovieItem(
                                 title = title,
                                 image = imageUrl,
-                                url = id, // Storing ID in url to pass to loadMediaStructure
+                                url = id,
                                 isPoster = true,
                                 referer = "$mainUrl/"
                             )
@@ -194,10 +192,67 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (passing ID forward)
+    // 4. Load Media Structure (Series Handle Update)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        // Here postUrl is actually the 'id' (e.g. 89ee9643-532d-4124-82cb-bc78ee3bb85d)
-        MediaStructure(
+        val contentId = postUrl // Here postUrl is the 'id'
+        
+        try {
+            // First check what type of content this is
+            val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
+            val responseBody = fetchApiSync(targetUrl)
+            
+            if (responseBody.isNotEmpty()) {
+                val json = JSONObject(responseBody)
+                val contentType = json.optString("content_type", "")
+                val slug = json.optString("slug", "")
+
+                // Check if it is a Series / TV Show (PROGRAM)
+                if (contentType == "PROGRAM" && slug.isNotEmpty()) {
+                    // Fetch episodes using slug
+                    val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slug?limit=100&offset=0"
+                    val widgetResp = fetchApiSync(widgetUrl)
+                    
+                    if (widgetResp.isNotEmpty()) {
+                        val widgetJson = JSONObject(widgetResp)
+                        val items = widgetJson.optJSONArray("items") ?: JSONArray()
+                        
+                        val seasonMap = linkedMapOf<String, MutableList<EpisodeItem>>()
+                        
+                        for (i in 0 until items.length()) {
+                            val epItem = items.getJSONObject(i)
+                            val epId = epItem.optString("id")
+                            val epTitle = epItem.optString("title")
+                            
+                            if (epId.isNotEmpty()) {
+                                // Extract Season from title (e.g., "S1 E1" -> "S1")
+                                val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(epTitle)
+                                val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
+                                
+                                val rawLinks = listOf(Pair("HD", epId))
+                                seasonMap.getOrPut(seasonName) { mutableListOf() }.add(
+                                    EpisodeItem(name = epTitle, rawGenerateLinks = rawLinks)
+                                )
+                            }
+                        }
+                        
+                        val seasonsList = seasonMap.map { SeasonItem(name = it.key, episodes = it.value) }
+                        
+                        if (seasonsList.isNotEmpty()) {
+                            return@withContext MediaStructure(
+                                isSeries = true,
+                                rawMovieLinks = emptyList(),
+                                seasons = seasonsList
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Fallback for Single Movie or if Series logic fails
+        return@withContext MediaStructure(
             isSeries = false,
             rawMovieLinks = listOf(Pair("HD", postUrl)),
             seasons = emptyList()
@@ -206,7 +261,7 @@ class BongoBDProvider : MainAPI {
 
     // 5. Resolve Direct HLS Link
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
-        val contentId = generateUrl // The ID passed from loadMediaStructure
+        val contentId = generateUrl // The Episode ID or Movie ID
         val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
 
         val responseBody = fetchApiSync(targetUrl)
@@ -221,7 +276,6 @@ class BongoBDProvider : MainAPI {
                 val m3u8RelativeUrl = hls?.optString("url") ?: ""
 
                 if (m3u8RelativeUrl.isNotEmpty()) {
-                    // Prepend vod link for full m3u8 path
                     val streamUrl = if (m3u8RelativeUrl.startsWith("/")) {
                         "https://vod.bongobd.com/vod/vod$m3u8RelativeUrl"
                     } else {
