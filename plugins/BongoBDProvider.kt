@@ -11,7 +11,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -110,7 +109,6 @@ class BongoBDProvider : MainAPI {
                     val title = item.optString("title")
                     val contentType = item.optString("contentType")
 
-                    // Exclude root PROGRAM items and Trailers from main page list too just in case
                     if (contentType == "PROGRAM" || title.contains("Trailer", ignoreCase = true)) continue
 
                     var imageUrl = ""
@@ -196,7 +194,7 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Series Handle Update with Ignore Logic)
+    // 4. Load Media Structure (Multi-Season Handle Added)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl 
         
@@ -209,54 +207,78 @@ class BongoBDProvider : MainAPI {
                 val contentType = json.optString("content_type", "")
                 val originalSlug = json.optString("slug", "")
 
+                // Find max_season from either "program" object or root JSON
+                val programObj = json.optJSONObject("program")
+                val maxSeason = programObj?.optInt("max_season", 1) ?: json.optInt("max_season", 1)
+
                 if (contentType == "PROGRAM" && originalSlug.isNotEmpty()) {
                     
-                    fun fetchWidgetItems(slugToTry: String): JSONArray {
+                    // Helper to fetch list of JSONObjects from widget API
+                    fun fetchWidgetItems(slugToTry: String): List<JSONObject> {
                         val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slugToTry?limit=100&offset=0"
                         val widgetResp = fetchApiSync(widgetUrl)
+                        val list = mutableListOf<JSONObject>()
                         if (widgetResp.isNotEmpty()) {
                             try {
-                                return JSONObject(widgetResp).optJSONArray("items") ?: JSONArray()
+                                val arr = JSONObject(widgetResp).optJSONArray("items")
+                                if (arr != null) {
+                                    for (i in 0 until arr.length()) list.add(arr.getJSONObject(i))
+                                }
                             } catch (e: Exception) {}
                         }
-                        return JSONArray()
+                        return list
                     }
 
-                    var items = fetchWidgetItems(originalSlug)
+                    val allEpisodes = mutableListOf<JSONObject>()
+                    
+                    // Fallback slugs
+                    val titleObj = json.optJSONObject("title")
+                    val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
+                    val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+                    val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
 
-                    if (items.length() == 0) {
-                        val titleObj = json.optJSONObject("title")
-                        val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
-                        
-                        val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
-                        
-                        if (titleSlug.isNotEmpty() && titleSlug != originalSlug) {
+                    if (maxSeason > 1) {
+                        // Multi-Season Logic: Loop through 1 to maxSeason
+                        for (i in 1..maxSeason) {
+                            var seasonItems = fetchWidgetItems("$originalSlug-season-$i")
+                            if (seasonItems.isEmpty() && titleSlug.isNotEmpty()) {
+                                seasonItems = fetchWidgetItems("$titleSlug-season-$i")
+                            }
+                            if (seasonItems.isEmpty() && strippedSlug != originalSlug) {
+                                seasonItems = fetchWidgetItems("$strippedSlug-season-$i")
+                            }
+                            allEpisodes.addAll(seasonItems)
+                        }
+                    } else {
+                        // Single-Season Logic
+                        var items = fetchWidgetItems(originalSlug)
+                        if (items.isEmpty() && titleSlug.isNotEmpty() && titleSlug != originalSlug) {
                             items = fetchWidgetItems(titleSlug)
                         }
-                    }
-
-                    if (items.length() == 0) {
-                        val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
-                        if (strippedSlug != originalSlug) {
+                        if (items.isEmpty() && strippedSlug != originalSlug) {
                             items = fetchWidgetItems(strippedSlug)
                         }
+                        allEpisodes.addAll(items)
                     }
 
-                    if (items.length() > 0) {
+                    // Process all aggregated episodes
+                    if (allEpisodes.isNotEmpty()) {
                         val seasonMap = linkedMapOf<String, MutableList<EpisodeItem>>()
                         
-                        for (i in 0 until items.length()) {
-                            val epItem = items.getJSONObject(i)
+                        // Prevent duplicate adding if APIs return overlapping data
+                        val processedIds = mutableSetOf<String>()
+                        
+                        for (epItem in allEpisodes) {
                             val epId = epItem.optString("id")
                             val epTitle = epItem.optString("title")
                             val epContentType = epItem.optString("contentType")
 
-                            // IGNORE LOGIC: Skip PROGRAM types (like root series links) and Trailers
+                            // IGNORE LOGIC: Skip PROGRAM types and Trailers
                             if (epContentType == "PROGRAM" || epTitle.contains("Trailer", ignoreCase = true)) {
                                 continue
                             }
                             
-                            if (epId.isNotEmpty()) {
+                            if (epId.isNotEmpty() && processedIds.add(epId)) {
                                 val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(epTitle)
                                 val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
                                 
