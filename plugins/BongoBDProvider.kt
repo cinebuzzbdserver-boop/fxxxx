@@ -89,6 +89,23 @@ class BongoBDProvider : MainAPI {
         }
     }
 
+    // Helper to check if an item is useless (Trailer, Teaser, Song, or missing Season/Episode pattern)
+    private fun isUselessEpisode(title: String, contentType: String): Boolean {
+        if (contentType == "PROGRAM") return true
+        
+        val lowerTitle = title.lowercase()
+        if (lowerTitle.contains("trailer") || 
+            lowerTitle.contains("teaser") || 
+            lowerTitle.contains("promo") || 
+            lowerTitle.contains("song")) {
+            return true
+        }
+
+        // Strict Check: Must contain a pattern like "S1 E2", "Season 1", "E12", "Part 1" etc.
+        val seasonEpRegex = Regex("""(?i)(S\d+|Season\s*\d+|E\d+|Episode\s*\d+|Part\s*\d+|Vol\s*\d+)""")
+        return !seasonEpRegex.containsMatchIn(title)
+    }
+
     // 2. Fetch Item List
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val limit = 100
@@ -194,7 +211,7 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Multi-Season Handle Added)
+    // 4. Load Media Structure (Multi-Season & Strict Ignore Logic)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl 
         
@@ -207,13 +224,11 @@ class BongoBDProvider : MainAPI {
                 val contentType = json.optString("content_type", "")
                 val originalSlug = json.optString("slug", "")
 
-                // Find max_season from either "program" object or root JSON
                 val programObj = json.optJSONObject("program")
                 val maxSeason = programObj?.optInt("max_season", 1) ?: json.optInt("max_season", 1)
 
                 if (contentType == "PROGRAM" && originalSlug.isNotEmpty()) {
                     
-                    // Helper to fetch list of JSONObjects from widget API
                     fun fetchWidgetItems(slugToTry: String): List<JSONObject> {
                         val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slugToTry?limit=100&offset=0"
                         val widgetResp = fetchApiSync(widgetUrl)
@@ -231,14 +246,12 @@ class BongoBDProvider : MainAPI {
 
                     val allEpisodes = mutableListOf<JSONObject>()
                     
-                    // Fallback slugs
                     val titleObj = json.optJSONObject("title")
                     val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
                     val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
                     val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
 
                     if (maxSeason > 1) {
-                        // Multi-Season Logic: Loop through 1 to maxSeason
                         for (i in 1..maxSeason) {
                             var seasonItems = fetchWidgetItems("$originalSlug-season-$i")
                             if (seasonItems.isEmpty() && titleSlug.isNotEmpty()) {
@@ -250,7 +263,6 @@ class BongoBDProvider : MainAPI {
                             allEpisodes.addAll(seasonItems)
                         }
                     } else {
-                        // Single-Season Logic
                         var items = fetchWidgetItems(originalSlug)
                         if (items.isEmpty() && titleSlug.isNotEmpty() && titleSlug != originalSlug) {
                             items = fetchWidgetItems(titleSlug)
@@ -261,11 +273,8 @@ class BongoBDProvider : MainAPI {
                         allEpisodes.addAll(items)
                     }
 
-                    // Process all aggregated episodes
                     if (allEpisodes.isNotEmpty()) {
                         val seasonMap = linkedMapOf<String, MutableList<EpisodeItem>>()
-                        
-                        // Prevent duplicate adding if APIs return overlapping data
                         val processedIds = mutableSetOf<String>()
                         
                         for (epItem in allEpisodes) {
@@ -273,13 +282,13 @@ class BongoBDProvider : MainAPI {
                             val epTitle = epItem.optString("title")
                             val epContentType = epItem.optString("contentType")
 
-                            // IGNORE LOGIC: Skip PROGRAM types and Trailers
-                            if (epContentType == "PROGRAM" || epTitle.contains("Trailer", ignoreCase = true)) {
+                            // IGNORE LOGIC: Use strict checker
+                            if (isUselessEpisode(epTitle, epContentType)) {
                                 continue
                             }
                             
                             if (epId.isNotEmpty() && processedIds.add(epId)) {
-                                val seasonMatch = Regex("""S(\d+)""", RegexOption.IGNORE_CASE).find(epTitle)
+                                val seasonMatch = Regex("""(?i)S(\d+)""").find(epTitle)
                                 val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
                                 
                                 val rawLinks = listOf(Pair("HD", epId))
