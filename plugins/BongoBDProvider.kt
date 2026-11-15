@@ -12,6 +12,7 @@ import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 class BongoBDProvider : MainAPI {
@@ -75,6 +76,7 @@ class BongoBDProvider : MainAPI {
                 .header("user-agent", userAgent)
                 .header("origin", mainUrl)
                 .header("referer", "$mainUrl/")
+                .header("accept", "*/*")
                 .build()
 
             val response = httpClient.newCall(request).execute()
@@ -138,12 +140,61 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
+    // 3. Search Logic Added Here
     override suspend fun search(query: String, page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
-        // Optional: Implement Search logic if needed, currently returns empty
-        emptyList()
+        val limit = 20
+        val offset = if (page <= 1) 0 else (page - 1) * limit
+        val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
+        
+        // Search API url
+        val targetUrl = "https://api.bongo-solutions.com/spiderman/api/v1/search?q=$encodedQuery&offset=$offset&limit=$limit"
+
+        val responseBody = fetchApiSync(targetUrl)
+        val items = mutableListOf<MovieItem>()
+
+        if (responseBody.isNotEmpty()) {
+            try {
+                val json = JSONObject(responseBody)
+                val jsonArray = json.optJSONArray("items") ?: return@withContext emptyList()
+
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.getJSONObject(i)
+                    val id = item.optString("id") // Content ID
+                    val title = item.optString("title")
+
+                    // Extract THUMB_PORTRAIT image
+                    var imageUrl = ""
+                    val imagesArr = item.optJSONArray("images")
+                    if (imagesArr != null) {
+                        for (j in 0 until imagesArr.length()) {
+                            val imgObj = imagesArr.getJSONObject(j)
+                            if (imgObj.optString("code") == "THUMB_PORTRAIT") {
+                                imageUrl = imgObj.optString("location")
+                                break
+                            }
+                        }
+                    }
+
+                    if (id.isNotEmpty() && title.isNotEmpty()) {
+                        items.add(
+                            MovieItem(
+                                title = title,
+                                image = imageUrl,
+                                url = id, // Storing ID in url to pass to loadMediaStructure
+                                isPoster = true,
+                                referer = "$mainUrl/"
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return@withContext items
     }
 
-    // 3. Load Media Structure (passing ID forward)
+    // 4. Load Media Structure (passing ID forward)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         // Here postUrl is actually the 'id' (e.g. 89ee9643-532d-4124-82cb-bc78ee3bb85d)
         MediaStructure(
@@ -153,7 +204,7 @@ class BongoBDProvider : MainAPI {
         )
     }
 
-    // 4. Resolve Direct HLS Link
+    // 5. Resolve Direct HLS Link
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
         val contentId = generateUrl // The ID passed from loadMediaStructure
         val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/contents/$contentId"
