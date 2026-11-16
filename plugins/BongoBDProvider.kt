@@ -110,7 +110,8 @@ class BongoBDProvider : MainAPI {
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val limit = 100
         val offset = if (page <= 1) 0 else (page - 1) * limit
-        val targetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/bachelor-point-season-5?limit=$limit&offset=$offset"
+        // Updated URL for home page
+        val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/widget/placeholder/bongo-originals?limit=$limit&offset=$offset"
 
         val responseBody = fetchApiSync(targetUrl)
         val items = mutableListOf<MovieItem>()
@@ -124,9 +125,9 @@ class BongoBDProvider : MainAPI {
                     val item = jsonArray.getJSONObject(i)
                     val id = item.optString("id") 
                     val title = item.optString("title")
-                    val contentType = item.optString("contentType")
 
-                    if (contentType == "PROGRAM" || title.contains("Trailer", ignoreCase = true)) continue
+                    // Ignore only Trailers on the main page, DO NOT ignore PROGRAM here
+                    if (title.contains("Trailer", ignoreCase = true)) continue
 
                     var imageUrl = ""
                     val imagesArr = item.optJSONArray("images")
