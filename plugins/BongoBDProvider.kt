@@ -126,7 +126,7 @@ class BongoBDProvider : MainAPI {
                     val id = item.optString("id") 
                     val title = item.optString("title")
 
-                    // Ignore only Trailers on the main page
+                    // Ignore only Trailers/Teasers on the main page
                     if (title.contains("Trailer", ignoreCase = true) || 
                         title.contains("Teaser", ignoreCase = true) ||
                         title.contains("Promo", ignoreCase = true)) {
@@ -216,7 +216,7 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Updated with Perfect Season/Program ID Logic & Limit 1000)
+    // 4. Load Media Structure (Updated with program -> entity_program -> master_id Fallback)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl 
         
@@ -228,38 +228,37 @@ class BongoBDProvider : MainAPI {
                 val json = JSONObject(responseBody)
                 val contentType = json.optString("content_type", "")
                 
-                // Smart Extraction of Program ID
+                val programObj = json.optJSONObject("program")
+                val vodObj = json.optJSONObject("vod")
+                val innerProgramObj = vodObj?.optJSONObject("program")
+
                 var programId = ""
+
+                // Priority 0: If it's the root PROGRAM itself
                 if (contentType == "PROGRAM") {
                     programId = json.optString("id", "")
                 }
-                
-                val programObj = json.optJSONObject("program")
-                if (programId.isEmpty() && programObj != null) {
-                    programId = programObj.optString("id", "")
-                }
-                
-                val vodObj = json.optJSONObject("vod")
-                if (vodObj != null) {
-                    if (programId.isEmpty()) {
-                        programId = vodObj.optString("entity_program", "")
-                    }
-                    val innerProgram = vodObj.optJSONObject("program")
-                    if (programId.isEmpty() && innerProgram != null) {
-                        programId = innerProgram.optString("id", "")
-                    }
-                }
-                
-                // Smart Extraction of Max Season (Checking everywhere)
+
+                // Priority 1: Check inside "program" -> "id"
+                if (programId.isEmpty()) programId = programObj?.optString("id", "") ?: ""
+                if (programId.isEmpty()) programId = innerProgramObj?.optString("id", "") ?: ""
+
+                // Priority 2: Check "entity_program" (usually inside vod)
+                if (programId.isEmpty()) programId = vodObj?.optString("entity_program", "") ?: ""
+                if (programId.isEmpty()) programId = json.optString("entity_program", "")
+
+                // Priority 3: Fallback to "master_id"
+                if (programId.isEmpty()) programId = programObj?.optString("master_id", "") ?: ""
+                if (programId.isEmpty()) programId = innerProgramObj?.optString("master_id", "") ?: ""
+                if (programId.isEmpty()) programId = json.optString("master_id", "")
+
+                // Extract Max Season
                 var maxSeason = json.optInt("max_season", 0)
                 if (programObj != null && programObj.has("max_season")) {
                     maxSeason = maxOf(maxSeason, programObj.optInt("max_season", 0))
                 }
-                if (vodObj != null) {
-                    val innerProgram = vodObj.optJSONObject("program")
-                    if (innerProgram != null && innerProgram.has("max_season")) {
-                        maxSeason = maxOf(maxSeason, innerProgram.optInt("max_season", 0))
-                    }
+                if (innerProgramObj != null && innerProgramObj.has("max_season")) {
+                    maxSeason = maxOf(maxSeason, innerProgramObj.optInt("max_season", 0))
                 }
                 if (maxSeason < 1) maxSeason = 1
 
@@ -268,9 +267,8 @@ class BongoBDProvider : MainAPI {
                     
                     val allEpisodes = mutableListOf<JSONObject>()
                     
-                    // Loop through all available seasons exactly
+                    // Loop through all available seasons exactly (Limit set to 1000)
                     for (seasonNum in 1..maxSeason) {
-                        // FIX: Limit changed from 100 to 1000 to fetch large content (e.g. 600 episodes) properly
                         val seasonApiUrl = "https://api.bongo-solutions.com/ironman/api/v1/content/season?programId=$programId&season=$seasonNum&limit=1000&offset=0&sort=episode"
                         val seasonResp = fetchApiSync(seasonApiUrl)
                         
@@ -296,7 +294,7 @@ class BongoBDProvider : MainAPI {
                             val epTitle = epItem.optString("title")
                             val epContentType = epItem.optString("contentType")
 
-                            // IGNORE LOGIC: Use strict checker
+                            // IGNORE LOGIC
                             if (isUselessEpisode(epTitle, epContentType)) {
                                 continue
                             }
@@ -328,7 +326,7 @@ class BongoBDProvider : MainAPI {
             e.printStackTrace()
         }
 
-        // Fallback for Single Movie or if Series logic completely fails
+        // Fallback for Single Movie
         return@withContext MediaStructure(
             isSeries = false,
             rawMovieLinks = listOf(Pair("HD", postUrl)),
