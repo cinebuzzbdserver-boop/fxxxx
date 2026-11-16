@@ -101,7 +101,7 @@ class BongoBDProvider : MainAPI {
             return true
         }
 
-        // Strict Check: Must contain a pattern like "S1 E2", "Season 1", "E12", "Part 1" etc.
+        // Strict Check: Must contain a pattern like "S1 E2", "Season 1", "E12", "Part 1", "Episode" etc.
         val seasonEpRegex = Regex("""(?i)(S\d+|Season\s*\d+|E\d+|Episode\s*\d+|Part\s*\d+|Vol\s*\d+)""")
         return !seasonEpRegex.containsMatchIn(title)
     }
@@ -110,7 +110,7 @@ class BongoBDProvider : MainAPI {
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val limit = 100
         val offset = if (page <= 1) 0 else (page - 1) * limit
-        // Updated URL for home page
+        // Home page API
         val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/widget/placeholder/bongo-originals?limit=$limit&offset=$offset"
 
         val responseBody = fetchApiSync(targetUrl)
@@ -126,8 +126,12 @@ class BongoBDProvider : MainAPI {
                     val id = item.optString("id") 
                     val title = item.optString("title")
 
-                    // Ignore only Trailers on the main page, DO NOT ignore PROGRAM here
-                    if (title.contains("Trailer", ignoreCase = true)) continue
+                    // Ignore only Trailers on the main page
+                    if (title.contains("Trailer", ignoreCase = true) || 
+                        title.contains("Teaser", ignoreCase = true) ||
+                        title.contains("Promo", ignoreCase = true)) {
+                        continue
+                    }
 
                     var imageUrl = ""
                     val imagesArr = item.optJSONArray("images")
@@ -146,7 +150,7 @@ class BongoBDProvider : MainAPI {
                             MovieItem(
                                 title = title,
                                 image = imageUrl,
-                                url = id, 
+                                url = id, // Always passing ID
                                 isPoster = true,
                                 referer = "$mainUrl/"
                             )
@@ -212,7 +216,7 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Multi-Season & Strict Ignore Logic)
+    // 4. Load Media Structure (Updated with Perfect Season/Program ID Logic)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl 
         
@@ -223,55 +227,54 @@ class BongoBDProvider : MainAPI {
             if (responseBody.isNotEmpty()) {
                 val json = JSONObject(responseBody)
                 val contentType = json.optString("content_type", "")
-                val originalSlug = json.optString("slug", "")
-
+                
+                // For a series, the root API gives us either a "program" object or "entity_program" ID
+                var programId = ""
+                var maxSeason = 1
+                
                 val programObj = json.optJSONObject("program")
-                val maxSeason = programObj?.optInt("max_season", 1) ?: json.optInt("max_season", 1)
+                val vodObj = json.optJSONObject("vod")
+                
+                if (programObj != null && programObj.has("id")) {
+                    programId = programObj.optString("id", "")
+                    maxSeason = programObj.optInt("max_season", 1)
+                } else if (vodObj != null) {
+                    programId = vodObj.optString("entity_program", "")
+                    val innerProgramObj = vodObj.optJSONObject("program")
+                    if (innerProgramObj != null) {
+                        maxSeason = innerProgramObj.optInt("max_season", 1)
+                        if (programId.isEmpty()) {
+                            programId = innerProgramObj.optString("id", "")
+                        }
+                    }
+                }
+                
+                // Sometimes the root object itself is the program
+                if (programId.isEmpty() && contentType == "PROGRAM") {
+                    programId = json.optString("id", "")
+                    maxSeason = json.optInt("max_season", 1)
+                }
 
-                if (contentType == "PROGRAM" && originalSlug.isNotEmpty()) {
+                if (programId.isNotEmpty() && (contentType == "PROGRAM" || contentType == "VOD_MULTIPART" || maxSeason > 1)) {
                     
-                    fun fetchWidgetItems(slugToTry: String): List<JSONObject> {
-                        val widgetUrl = "https://api.bongo-solutions.com/ironman/api/v2/widget/$slugToTry?limit=100&offset=0"
-                        val widgetResp = fetchApiSync(widgetUrl)
-                        val list = mutableListOf<JSONObject>()
-                        if (widgetResp.isNotEmpty()) {
+                    val allEpisodes = mutableListOf<JSONObject>()
+                    
+                    // Loop through seasons and fetch exactly by programId and season number
+                    for (seasonNum in 1..maxSeason) {
+                        val seasonApiUrl = "https://api.bongo-solutions.com/ironman/api/v1/content/season?programId=$programId&season=$seasonNum&limit=100&offset=0&sort=episode"
+                        val seasonResp = fetchApiSync(seasonApiUrl)
+                        
+                        if (seasonResp.isNotEmpty()) {
                             try {
-                                val arr = JSONObject(widgetResp).optJSONArray("items")
-                                if (arr != null) {
-                                    for (i in 0 until arr.length()) list.add(arr.getJSONObject(i))
+                                val seasonJson = JSONObject(seasonResp)
+                                val itemsArray = seasonJson.optJSONArray("items")
+                                if (itemsArray != null) {
+                                    for (i in 0 until itemsArray.length()) {
+                                        allEpisodes.add(itemsArray.getJSONObject(i))
+                                    }
                                 }
                             } catch (e: Exception) {}
                         }
-                        return list
-                    }
-
-                    val allEpisodes = mutableListOf<JSONObject>()
-                    
-                    val titleObj = json.optJSONObject("title")
-                    val titleEn = titleObj?.optString("en")?.takeIf { it.isNotEmpty() } ?: json.optString("title")
-                    val titleSlug = titleEn.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
-                    val strippedSlug = originalSlug.replace(Regex("-[a-f0-9]{8,15}$"), "")
-
-                    if (maxSeason > 1) {
-                        for (i in 1..maxSeason) {
-                            var seasonItems = fetchWidgetItems("$originalSlug-season-$i")
-                            if (seasonItems.isEmpty() && titleSlug.isNotEmpty()) {
-                                seasonItems = fetchWidgetItems("$titleSlug-season-$i")
-                            }
-                            if (seasonItems.isEmpty() && strippedSlug != originalSlug) {
-                                seasonItems = fetchWidgetItems("$strippedSlug-season-$i")
-                            }
-                            allEpisodes.addAll(seasonItems)
-                        }
-                    } else {
-                        var items = fetchWidgetItems(originalSlug)
-                        if (items.isEmpty() && titleSlug.isNotEmpty() && titleSlug != originalSlug) {
-                            items = fetchWidgetItems(titleSlug)
-                        }
-                        if (items.isEmpty() && strippedSlug != originalSlug) {
-                            items = fetchWidgetItems(strippedSlug)
-                        }
-                        allEpisodes.addAll(items)
                     }
 
                     if (allEpisodes.isNotEmpty()) {
@@ -315,7 +318,7 @@ class BongoBDProvider : MainAPI {
             e.printStackTrace()
         }
 
-        // Fallback for Single Movie
+        // Fallback for Single Movie or if Series logic completely fails
         return@withContext MediaStructure(
             isSeries = false,
             rawMovieLinks = listOf(Pair("HD", postUrl)),
