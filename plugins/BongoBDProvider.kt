@@ -101,8 +101,8 @@ class BongoBDProvider : MainAPI {
             return true
         }
 
-        // Strict Check: Must contain a pattern like "S1 E2", "Season 1", "E12", "Part 1", "Episode" etc.
-        val seasonEpRegex = Regex("""(?i)(S\d+|Season\s*\d+|E\d+|Episode\s*\d+|Part\s*\d+|Vol\s*\d+)""")
+        // UPDATE: Made Regex more flexible to catch patterns like "Episode - 04" or "Part: 1"
+        val seasonEpRegex = Regex("""(?i)(S\d+|Season[\s\-:]*\d+|E\d+|Episode[\s\-:]*\d+|Part[\s\-:]*\d+|Vol[\s\-:]*\d+)""")
         return !seasonEpRegex.containsMatchIn(title)
     }
 
@@ -300,7 +300,8 @@ class BongoBDProvider : MainAPI {
                             }
                             
                             if (epId.isNotEmpty() && processedIds.add(epId)) {
-                                val seasonMatch = Regex("""(?i)S(\d+)""").find(epTitle)
+                                // UPDATE: Also updated regex here to cleanly extract Season number even with strange formats
+                                val seasonMatch = Regex("""(?i)(?:S|Season[\s\-:]*)(\d+)""").find(epTitle)
                                 val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
                                 
                                 val rawLinks = listOf(Pair("HD", epId))
