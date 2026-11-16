@@ -101,17 +101,31 @@ class BongoBDProvider : MainAPI {
             return true
         }
 
-        // UPDATE: Made Regex more flexible to catch patterns like "Episode - 04" or "Part: 1"
+        // Strict Check: Must contain a pattern like "S1 E2", "Season 1", "E12", "Part 1", "Episode" etc.
         val seasonEpRegex = Regex("""(?i)(S\d+|Season[\s\-:]*\d+|E\d+|Episode[\s\-:]*\d+|Part[\s\-:]*\d+|Vol[\s\-:]*\d+)""")
         return !seasonEpRegex.containsMatchIn(title)
     }
 
-    // 2. Fetch Item List
+    // 2. Fetch Item List (Category Wise Based on Page Number)
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
-        val limit = 100
-        val offset = if (page <= 1) 0 else (page - 1) * limit
-        // Home page API
-        val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/widget/placeholder/bongo-originals?limit=$limit&offset=$offset"
+        // List of slugs provided by you
+        val categories = listOf(
+            "popular-drama",
+            "bongo-originals",
+            "watch-free",
+            "mini-series",
+            "south-indian-blockbuster",
+            "series"
+        )
+
+        // If the app requests a page beyond our available categories, return empty to stop loading
+        if (page > categories.size) return@withContext emptyList()
+
+        val currentSlug = categories[page - 1]
+        val limit = 1000 // Limit increased to 1000
+        val offset = 0   // Since we pull 1000 at once, offset can be 0 for each category
+        
+        val targetUrl = "https://api.bongo-solutions.com/ironman/api/v1/widget/placeholder/$currentSlug?limit=$limit&offset=$offset"
 
         val responseBody = fetchApiSync(targetUrl)
         val items = mutableListOf<MovieItem>()
@@ -126,7 +140,7 @@ class BongoBDProvider : MainAPI {
                     val id = item.optString("id") 
                     val title = item.optString("title")
 
-                    // Ignore only Trailers/Teasers on the main page
+                    // Ignore Trailers/Teasers on the main page
                     if (title.contains("Trailer", ignoreCase = true) || 
                         title.contains("Teaser", ignoreCase = true) ||
                         title.contains("Promo", ignoreCase = true)) {
@@ -216,7 +230,7 @@ class BongoBDProvider : MainAPI {
         return@withContext items
     }
 
-    // 4. Load Media Structure (Updated with program -> entity_program -> master_id Fallback)
+    // 4. Load Media Structure (With Priority Fallback Logic)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
         val contentId = postUrl 
         
@@ -300,7 +314,6 @@ class BongoBDProvider : MainAPI {
                             }
                             
                             if (epId.isNotEmpty() && processedIds.add(epId)) {
-                                // UPDATE: Also updated regex here to cleanly extract Season number even with strange formats
                                 val seasonMatch = Regex("""(?i)(?:S|Season[\s\-:]*)(\d+)""").find(epTitle)
                                 val seasonName = if (seasonMatch != null) "Season ${seasonMatch.groupValues[1].toInt()}" else "Season 1"
                                 
