@@ -62,23 +62,27 @@ class DeeptoPlayProvider : MainAPI {
                     val item = jsonArray.getJSONObject(i)
                     val title = item.optString("title")
                     val slug = item.optString("slug")
-                    val type = item.optString("type") // 'films' or 'series'
-                    val objectType = item.optString("object") // To ignore clips/shorts if needed
+                    val type = item.optString("type")
 
                     var poster = item.optString("poster")
                     if (poster.isEmpty() || poster == "null") {
                         poster = item.optString("thumbnail")
                     }
 
+                    // API থেকে দেওয়া অরিজিনাল route_uri ব্যবহার করা হচ্ছে (সামনের স্লাশ সরিয়ে)
+                    var routeUri = item.optString("route_uri")
+                    if (routeUri.isEmpty() || routeUri == "null") {
+                        routeUri = "$type/$slug"
+                    } else {
+                        routeUri = routeUri.removePrefix("/")
+                    }
+
                     if (slug.isNotEmpty() && title.isNotEmpty()) {
-                        // Pass type and slug in url to decide behavior in loadMediaStructure
-                        val paramUrl = if (type == "series" || type == "micro-drama") "series/$slug" else "films/$slug"
-                        
                         items.add(
                             MovieItem(
                                 title = title,
                                 image = poster,
-                                url = paramUrl,
+                                url = routeUri, // url প্যারামিটার হিসেবে routeUri পাঠানো হচ্ছে
                                 isPoster = true,
                                 referer = mainUrl
                             )
@@ -95,7 +99,7 @@ class DeeptoPlayProvider : MainAPI {
     // 3. Search Logic
     override suspend fun search(query: String, page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
-        val targetUrl = "$apiBaseUrl/search?query=$encodedQuery" // Pagination might be added later by API
+        val targetUrl = "$apiBaseUrl/search?query=$encodedQuery"
 
         return@withContext try {
             val responseBody = fetchApiSync(targetUrl)
@@ -111,24 +115,27 @@ class DeeptoPlayProvider : MainAPI {
                     val item = jsonArray.getJSONObject(i)
                     val title = item.optString("title")
                     val slug = item.optString("slug")
-                    val type = item.optString("type") // 'films' or 'series'
-
-                    // Skip trailers/shorts from search
-                    if (type == "shorts" || type == "clips") continue 
+                    val type = item.optString("type")
 
                     var poster = item.optString("poster")
                     if (poster.isEmpty() || poster == "null") {
                         poster = item.optString("thumbnail")
                     }
 
-                    if (slug.isNotEmpty() && title.isNotEmpty()) {
-                        val paramUrl = if (type == "series" || type == "micro-drama") "series/$slug" else "films/$slug"
+                    // API থেকে দেওয়া অরিজিনাল route_uri ব্যবহার করা হচ্ছে
+                    var routeUri = item.optString("route_uri")
+                    if (routeUri.isEmpty() || routeUri == "null") {
+                        routeUri = "$type/$slug"
+                    } else {
+                        routeUri = routeUri.removePrefix("/")
+                    }
 
+                    if (slug.isNotEmpty() && title.isNotEmpty()) {
                         items.add(
                             MovieItem(
                                 title = title,
                                 image = poster,
-                                url = paramUrl,
+                                url = routeUri, // url প্যারামিটার হিসেবে routeUri পাঠানো হচ্ছে
                                 isPoster = true,
                                 referer = mainUrl
                             )
@@ -143,9 +150,9 @@ class DeeptoPlayProvider : MainAPI {
         }
     }
 
-    // 4. Load Media Structure (Handle Films & Series)
+    // 4. Load Media Structure (Handle All Types Dynamically)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        // postUrl will be like "films/amor-prem" or "series/ananta-bhalobasha"
+        // postUrl হবে "films/amor-prem" অথবা "micro-drama/achena-atithi" অথবা "series/ananta-bhalobasha"
         val targetUrl = "$apiBaseUrl/$postUrl"
         
         try {
@@ -155,6 +162,7 @@ class DeeptoPlayProvider : MainAPI {
                 val resultObj = json.optJSONObject("result") ?: return@withContext MediaStructure(false, emptyList(), emptyList())
                 val dataObj = resultObj.optJSONObject("data") ?: resultObj
                 
+                // শুধুমাত্র "series/" দিয়ে শুরু হলে সিরিজের লজিক কাজ করবে
                 val isSeries = postUrl.startsWith("series/")
 
                 if (isSeries) {
@@ -164,7 +172,6 @@ class DeeptoPlayProvider : MainAPI {
                     if (sectionsArray != null) {
                         for (i in 0 until sectionsArray.length()) {
                             val section = sectionsArray.getJSONObject(i)
-                            // We look for "Episodes" block
                             val itemsArray = section.optJSONArray("items")
                             
                             if (itemsArray != null && itemsArray.length() > 0) {
@@ -202,7 +209,7 @@ class DeeptoPlayProvider : MainAPI {
                     }
 
                 } else {
-                    // It is a Single Film
+                    // সিরিজ বাদে অন্যান্য সকল টাইপ (films, micro-drama, clips, shorts) সিঙ্গেল মুভি হিসেবে প্লে হবে
                     val filmUrl = dataObj.optString("url")
                     if (filmUrl.isNotEmpty() && filmUrl != "null") {
                         return@withContext MediaStructure(
@@ -222,7 +229,6 @@ class DeeptoPlayProvider : MainAPI {
 
     // 5. Resolve Direct Link
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
-        // Since the JSON already gives us the manifest.m3u8 link in 'url'
         if (generateUrl.isNotEmpty()) {
             return@withContext StreamItem(
                 quality = "HD",
