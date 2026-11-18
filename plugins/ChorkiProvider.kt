@@ -107,7 +107,7 @@ class ChorkiProvider : MainAPI {
         val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
         val targetUrl = "https://api-dynamic.chorki.net/v1/search?query=$encodedQuery&country=BD&platform=web&language=en"
 
-        return try {
+        return@withContext try {
             val request = Request.Builder().url(targetUrl).header("user-agent", userAgent).build()
             val response = httpClient.newCall(request).execute()
             val responseBody = response.body?.string() ?: ""
