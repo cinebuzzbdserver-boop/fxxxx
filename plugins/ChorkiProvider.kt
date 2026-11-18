@@ -25,7 +25,7 @@ class ChorkiProvider : MainAPI {
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    // 1. Fetch JSON using custom RSC headers
+    // 1. Fetch JSON/RSC using custom headers
     private fun fetchApiSync(targetUrl: String): String {
         return try {
             val request = Request.Builder()
@@ -47,51 +47,46 @@ class ChorkiProvider : MainAPI {
         }
     }
 
-    // 2. Fetch Item List (Home Page - Example using Movie route)
+    // 2. Fetch Item List (Home Page RSC Parser)
     override suspend fun getMainPage(page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val targetUrl = "$mainUrl/movie?_rsc=1d6mw"
         val responseBody = fetchApiSync(targetUrl)
         val items = mutableListOf<MovieItem>()
+        val addedUrls = mutableSetOf<String>()
 
         if (responseBody.isNotEmpty()) {
             try {
-                // RSC responses might have multiple JSON blocks separated by newlines.
-                // We find the block containing "resource_type" or "items"
-                val lines = responseBody.split("\n")
-                for (line in lines) {
-                    if (line.contains("\"items\":")) {
-                        // Extract valid JSON substring if prepended with identifiers (e.g. 1:[...])
-                        val jsonStr = line.substringAfter(":", line) 
-                        val jsonArray = try {
-                            JSONObject(jsonStr).optJSONArray("items")
-                        } catch (e: Exception) {
-                            try {
-                                org.json.JSONArray(jsonStr)
-                            } catch (ex: Exception) { null }
-                        } ?: continue
+                // RSC Payload-কে মডেল অনুযায়ী স্লিট করা হচ্ছে
+                val chunks = responseBody.split("\"classname\":\"App\\\\Models\\\\Video\"")
+                
+                for (i in 1 until chunks.size) {
+                    val chunk = chunks[i].take(2500) // পরবর্তী অবজেক্টে যেন না যায় তার জন্য লিমিট
+                    
+                    val title = """"title":"([^"\\]*(?:\\.[^"\\]*)*)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    val routeUri = """"route_uri":"([^"]+)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    
+                    // পোস্টার বা থাম্বনেইল কালেক্ট করা
+                    var poster = """"poster":"([^"]+)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    if (poster.isEmpty() || poster == "null") {
+                        poster = """"thumbnail":"([^"]+)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    }
+                    
+                    // JSON-এর ভেতরের ব্যাকস্ল্যাশ রিমুভ করা
+                    poster = poster.replace("\\/", "/")
 
-                        for (i in 0 until jsonArray.length()) {
-                            val item = jsonArray.optJSONObject(i) ?: continue
-                            val content = item.optJSONObject("content") ?: continue
-                            
-                            val title = content.optString("title")
-                            val routeUri = content.optString("route_uri") // e.g., /movie/rockstar
-                            var poster = content.optString("poster")
-                            if (poster.isEmpty() || poster == "null") {
-                                poster = content.optString("thumbnail")
-                            }
-
-                            if (routeUri.isNotEmpty() && title.isNotEmpty()) {
-                                items.add(
-                                    MovieItem(
-                                        title = title,
-                                        image = poster,
-                                        url = routeUri, 
-                                        isPoster = true,
-                                        referer = mainUrl
-                                    )
+                    // ক্লিপ এবং ট্রেইলার ইগনোর করা
+                    if (title.isNotEmpty() && routeUri.isNotEmpty() && routeUri != "null" && !routeUri.contains("/clip/")) {
+                        if (!addedUrls.contains(routeUri)) {
+                            addedUrls.add(routeUri)
+                            items.add(
+                                MovieItem(
+                                    title = title,
+                                    image = poster,
+                                    url = routeUri, 
+                                    isPoster = true,
+                                    referer = mainUrl
                                 )
-                            }
+                            )
                         }
                     }
                 }
@@ -102,7 +97,7 @@ class ChorkiProvider : MainAPI {
         return@withContext items
     }
 
-    // 3. Search Logic
+    // 3. Search Logic (API JSON Parser - অক্ষত রাখা হয়েছে)
     override suspend fun search(query: String, page: Int): List<MovieItem> = withContext(Dispatchers.IO) {
         val encodedQuery = URLEncoder.encode(query.trim(), "UTF-8")
         val targetUrl = "https://api-dynamic.chorki.net/v1/search?query=$encodedQuery&country=BD&platform=web&language=en"
@@ -150,105 +145,61 @@ class ChorkiProvider : MainAPI {
         }
     }
 
-    // 4. Load Media Structure (Movies & Series Handled Together)
+    // 4. Load Media Structure (Movies & Series RSC Parser)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        // postUrl holds the route_uri like "/movie/rockstar" or "/series/sugar-free"
         val targetUrl = "$mainUrl$postUrl?_rsc=1d6mw"
+        val responseBody = fetchApiSync(targetUrl)
         
-        try {
-            val responseBody = fetchApiSync(targetUrl)
-            
-            if (responseBody.isNotEmpty()) {
-                // Find the main JSON block containing "response": {"result": {"data": {...}}}
-                val lines = responseBody.split("\n")
-                var dataObj: JSONObject? = null
-                var sectionsArray: org.json.JSONArray? = null
+        var mainMovieUrl = ""
+        val episodesList = mutableListOf<EpisodeItem>()
+        val seasonsList = mutableListOf<SeasonItem>()
+
+        if (responseBody.isNotEmpty()) {
+            try {
+                // ভিডিও অবজেক্টগুলো আলাদা করা হচ্ছে
+                val chunks = responseBody.split("\"classname\":\"App\\\\Models\\\\Video\"")
                 
-                for (line in lines) {
-                    if (line.contains("\"result\":")) {
-                        try {
-                            val cleanJson = if (line.matches(Regex("^[0-9a-zA-Z]+:\\[?\\{.*"))) {
-                                line.substringAfter(":", line)
-                            } else {
-                                line
-                            }
-                            
-                            val json = JSONObject(if (cleanJson.startsWith("[")) cleanJson.removeSurrounding("[", "]") else cleanJson)
-                            val responseObj = json.optJSONObject("response") ?: json
-                            val resultObj = responseObj.optJSONObject("result")
-                            
-                            if (resultObj != null) {
-                                dataObj = resultObj.optJSONObject("data")
-                                sectionsArray = json.optJSONArray("sections") ?: responseObj.optJSONArray("sections") ?: resultObj.optJSONArray("sections")
-                                break
-                            }
-                        } catch (e: Exception) {
-                            continue
-                        }
-                    }
-                }
-
-                if (dataObj != null) {
-                    val type = dataObj.optString("type")
-                    val movieUrl = dataObj.optString("url")
-
-                    // Series Logic Check
-                    if (type == "series" || sectionsArray != null) {
-                        val seasonsList = mutableListOf<SeasonItem>()
-                        val episodesList = mutableListOf<EpisodeItem>()
-
-                        // Check if direct episodes are inside "sections"
-                        if (sectionsArray != null) {
-                            for (i in 0 until sectionsArray.length()) {
-                                val section = sectionsArray.getJSONObject(i)
-                                val itemsArray = section.optJSONArray("items")
-                                
-                                if (itemsArray != null) {
-                                    for (j in 0 until itemsArray.length()) {
-                                        val epObj = itemsArray.getJSONObject(j)
-                                        val epTitle = epObj.optString("title")
-                                        val epUrl = epObj.optString("url")
-                                        
-                                        if (epUrl.isNotEmpty() && epUrl != "null") {
-                                            episodesList.add(
-                                                EpisodeItem(
-                                                    name = epTitle,
-                                                    rawGenerateLinks = listOf(Pair("HD", epUrl))
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Fallback: Check if single episode URL is present but type is series
-                        if (episodesList.isEmpty() && movieUrl.isNotEmpty() && movieUrl != "null") {
-                            episodesList.add(EpisodeItem(name = dataObj.optString("title"), rawGenerateLinks = listOf(Pair("HD", movieUrl))))
-                        }
-
-                        if (episodesList.isNotEmpty()) {
-                            seasonsList.add(SeasonItem(name = "Episodes", episodes = episodesList))
-                            return@withContext MediaStructure(
-                                isSeries = true,
-                                rawMovieLinks = emptyList(),
-                                seasons = seasonsList
-                            )
-                        }
-                    } 
+                for (i in 1 until chunks.size) {
+                    val chunk = chunks[i].take(3500)
                     
-                    // Single Movie Logic
-                    if (movieUrl.isNotEmpty() && movieUrl != "null") {
-                        return@withContext MediaStructure(
-                            isSeries = false,
-                            rawMovieLinks = listOf(Pair("HD", movieUrl)),
-                            seasons = emptyList()
-                        )
+                    val title = """"title":"([^"\\]*(?:\\.[^"\\]*)*)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    val routeUri = """"route_uri":"([^"]+)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    var url = """"url":"([^"]+)"""".toRegex().find(chunk)?.groups?.get(1)?.value ?: ""
+                    
+                    // URL থেকে এস্কেপ করা স্ল্যাশ সড়িয়ে নেওয়া
+                    url = url.replace("\\/", "/")
+
+                    // ট্রেইলার ও ক্লিপ ইগনোর করা
+                    if (routeUri.contains("/clip/") || url.isEmpty() || url == "null") continue
+
+                    // মূল মুভি লিংকের সাথে মিললে
+                    if (routeUri == postUrl) {
+                        mainMovieUrl = url
+                    } 
+                    // যদি এপিসোড হয়
+                    else if (routeUri.contains("/episode/")) {
+                        episodesList.add(EpisodeItem(name = title, rawGenerateLinks = listOf(Pair("HD", url))))
                     }
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        }
+
+        // রিটার্ন লজিক (সিরিজ নাকি মুভি)
+        if (episodesList.isNotEmpty()) {
+            seasonsList.add(SeasonItem(name = "Episodes", episodes = episodesList))
+            return@withContext MediaStructure(
+                isSeries = true,
+                rawMovieLinks = emptyList(),
+                seasons = seasonsList
+            )
+        } else if (mainMovieUrl.isNotEmpty()) {
+            return@withContext MediaStructure(
+                isSeries = false,
+                rawMovieLinks = listOf(Pair("HD", mainMovieUrl)),
+                seasons = emptyList()
+            )
         }
 
         return@withContext MediaStructure(false, emptyList(), emptyList())
@@ -256,7 +207,6 @@ class ChorkiProvider : MainAPI {
 
     // 5. Resolve Direct Link
     override suspend fun resolveDirectLink(generateUrl: String): StreamItem? = withContext(Dispatchers.IO) {
-        // Because Chorki already provides the .m3u8 path inside 'url', generateUrl is the direct link
         if (generateUrl.isNotEmpty()) {
             return@withContext StreamItem(
                 quality = "HD",
