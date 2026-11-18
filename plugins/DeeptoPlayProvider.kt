@@ -7,6 +7,8 @@ import com.moviefy.stream.ui.screens.MovieItem
 import com.moviefy.stream.ui.screens.SeasonItem
 import com.moviefy.stream.ui.screens.StreamItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -69,7 +71,6 @@ class DeeptoPlayProvider : MainAPI {
                         poster = item.optString("thumbnail")
                     }
 
-                    // API থেকে দেওয়া অরিজিনাল route_uri ব্যবহার করা হচ্ছে (সামনের স্লাশ সরিয়ে)
                     var routeUri = item.optString("route_uri")
                     if (routeUri.isEmpty() || routeUri == "null") {
                         routeUri = "$type/$slug"
@@ -82,7 +83,7 @@ class DeeptoPlayProvider : MainAPI {
                             MovieItem(
                                 title = title,
                                 image = poster,
-                                url = routeUri, // url প্যারামিটার হিসেবে routeUri পাঠানো হচ্ছে
+                                url = routeUri, 
                                 isPoster = true,
                                 referer = mainUrl
                             )
@@ -122,7 +123,6 @@ class DeeptoPlayProvider : MainAPI {
                         poster = item.optString("thumbnail")
                     }
 
-                    // API থেকে দেওয়া অরিজিনাল route_uri ব্যবহার করা হচ্ছে
                     var routeUri = item.optString("route_uri")
                     if (routeUri.isEmpty() || routeUri == "null") {
                         routeUri = "$type/$slug"
@@ -135,7 +135,7 @@ class DeeptoPlayProvider : MainAPI {
                             MovieItem(
                                 title = title,
                                 image = poster,
-                                url = routeUri, // url প্যারামিটার হিসেবে routeUri পাঠানো হচ্ছে
+                                url = routeUri, 
                                 isPoster = true,
                                 referer = mainUrl
                             )
@@ -150,9 +150,48 @@ class DeeptoPlayProvider : MainAPI {
         }
     }
 
-    // 4. Load Media Structure (Handle All Types Dynamically)
+    // Helper Function to Fetch Episodes for a specific Season
+    private suspend fun fetchEpisodesForSeason(seasonUri: String, seasonTitle: String): SeasonItem? = withContext(Dispatchers.IO) {
+        val targetUrl = "$apiBaseUrl/$seasonUri"
+        val responseBody = fetchApiSync(targetUrl)
+        
+        if (responseBody.isNotEmpty()) {
+            try {
+                val json = JSONObject(responseBody)
+                val resultObj = json.optJSONObject("result") ?: return@withContext null
+                val dataObj = resultObj.optJSONObject("data") ?: return@withContext null
+                
+                val episodesArray = dataObj.optJSONArray("data")
+                val episodesList = mutableListOf<EpisodeItem>()
+
+                if (episodesArray != null) {
+                    for (i in 0 until episodesArray.length()) {
+                        val epObj = episodesArray.getJSONObject(i)
+                        val epTitle = epObj.optString("title")
+                        val epUrl = epObj.optString("url")
+                        
+                        if (epUrl.isNotEmpty() && epUrl != "null") {
+                            episodesList.add(
+                                EpisodeItem(
+                                    name = epTitle,
+                                    rawGenerateLinks = listOf(Pair("HD", epUrl))
+                                )
+                            )
+                        }
+                    }
+                }
+                if (episodesList.isNotEmpty()) {
+                    return@withContext SeasonItem(name = seasonTitle, episodes = episodesList)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        return@withContext null
+    }
+
+    // 4. Load Media Structure (Handle All Types Dynamically with Deep Fetching for Series)
     override suspend fun loadMediaStructure(postUrl: String): MediaStructure = withContext(Dispatchers.IO) {
-        // postUrl হবে "films/amor-prem" অথবা "micro-drama/achena-atithi" অথবা "series/ananta-bhalobasha"
         val targetUrl = "$apiBaseUrl/$postUrl"
         
         try {
@@ -162,39 +201,70 @@ class DeeptoPlayProvider : MainAPI {
                 val resultObj = json.optJSONObject("result") ?: return@withContext MediaStructure(false, emptyList(), emptyList())
                 val dataObj = resultObj.optJSONObject("data") ?: resultObj
                 
-                // শুধুমাত্র "series/" দিয়ে শুরু হলে সিরিজের লজিক কাজ করবে
                 val isSeries = postUrl.startsWith("series/")
 
                 if (isSeries) {
                     val seasonsList = mutableListOf<SeasonItem>()
                     val sectionsArray = resultObj.optJSONArray("sections")
+                    
+                    var seasonLinks = mutableListOf<Pair<String, String>>() // Pair<SeasonTitle, RouteUri>
 
                     if (sectionsArray != null) {
                         for (i in 0 until sectionsArray.length()) {
                             val section = sectionsArray.getJSONObject(i)
-                            val itemsArray = section.optJSONArray("items")
+                            val sectionTitle = section.optString("title")
                             
-                            if (itemsArray != null && itemsArray.length() > 0) {
-                                val episodesList = mutableListOf<EpisodeItem>()
-                                
-                                for (j in 0 until itemsArray.length()) {
-                                    val epObj = itemsArray.getJSONObject(j)
-                                    val epTitle = epObj.optString("title")
-                                    val epUrl = epObj.optString("url")
-                                    
-                                    if (epUrl.isNotEmpty() && epUrl != "null") {
-                                        episodesList.add(
-                                            EpisodeItem(
-                                                name = epTitle,
-                                                rawGenerateLinks = listOf(Pair("HD", epUrl))
-                                            )
-                                        )
+                            // Check if this section contains seasons (For Mega Serials like Khusbu)
+                            if (sectionTitle.contains("Seasons", ignoreCase = true)) {
+                                val itemsArray = section.optJSONArray("items")
+                                if (itemsArray != null) {
+                                    for (j in 0 until itemsArray.length()) {
+                                        val seasonObj = itemsArray.getJSONObject(j)
+                                        val sTitle = seasonObj.optString("title").ifEmpty { "Season ${j+1}" }
+                                        var sRouteUri = seasonObj.optString("route_uri")
+                                        if (sRouteUri.isNotEmpty() && sRouteUri != "null") {
+                                            sRouteUri = sRouteUri.removePrefix("/")
+                                            seasonLinks.add(Pair(sTitle, sRouteUri))
+                                        }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // If we found season links, fetch all of them concurrently
+                    if (seasonLinks.isNotEmpty()) {
+                        // Concurrent API Calls for all seasons
+                        val fetchedSeasons = seasonLinks.map { (sTitle, sRouteUri) ->
+                            async { fetchEpisodesForSeason(sRouteUri, sTitle) }
+                        }.awaitAll()
+
+                        seasonsList.addAll(fetchedSeasons.filterNotNull())
+                    } 
+                    // Fallback for normal series (where episodes are in the root JSON)
+                    else {
+                        if (sectionsArray != null) {
+                            for (i in 0 until sectionsArray.length()) {
+                                val section = sectionsArray.getJSONObject(i)
+                                val itemsArray = section.optJSONArray("items")
                                 
-                                if (episodesList.isNotEmpty()) {
-                                    val seasonTitle = section.optString("title").ifEmpty { "Season 1" }
-                                    seasonsList.add(SeasonItem(name = seasonTitle, episodes = episodesList))
+                                if (itemsArray != null && itemsArray.length() > 0 && section.optString("type") == "series") {
+                                    val episodesList = mutableListOf<EpisodeItem>()
+                                    
+                                    for (j in 0 until itemsArray.length()) {
+                                        val epObj = itemsArray.getJSONObject(j)
+                                        val epTitle = epObj.optString("title")
+                                        val epUrl = epObj.optString("url")
+                                        
+                                        if (epUrl.isNotEmpty() && epUrl != "null") {
+                                            episodesList.add(EpisodeItem(name = epTitle, rawGenerateLinks = listOf(Pair("HD", epUrl))))
+                                        }
+                                    }
+                                    
+                                    if (episodesList.isNotEmpty()) {
+                                        val seasonTitle = section.optString("title").ifEmpty { "Season 1" }
+                                        seasonsList.add(SeasonItem(name = seasonTitle, episodes = episodesList))
+                                    }
                                 }
                             }
                         }
@@ -209,7 +279,7 @@ class DeeptoPlayProvider : MainAPI {
                     }
 
                 } else {
-                    // সিরিজ বাদে অন্যান্য সকল টাইপ (films, micro-drama, clips, shorts) সিঙ্গেল মুভি হিসেবে প্লে হবে
+                    // For Films, Micro-Dramas, Shorts, etc.
                     val filmUrl = dataObj.optString("url")
                     if (filmUrl.isNotEmpty() && filmUrl != "null") {
                         return@withContext MediaStructure(
