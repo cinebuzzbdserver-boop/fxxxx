@@ -181,6 +181,7 @@ class DeeptoPlayProvider : MainAPI {
                     }
                 }
                 if (episodesList.isNotEmpty()) {
+                    episodesList.reverse() // লেটেস্ট এপিসোড উপরে আনার জন্য রিভার্স করা হলো
                     return@withContext SeasonItem(name = seasonTitle, episodes = episodesList)
                 }
             } catch (e: Exception) {
@@ -207,14 +208,13 @@ class DeeptoPlayProvider : MainAPI {
                     val seasonsList = mutableListOf<SeasonItem>()
                     val sectionsArray = resultObj.optJSONArray("sections")
                     
-                    var seasonLinks = mutableListOf<Pair<String, String>>() // Pair<SeasonTitle, RouteUri>
+                    var seasonLinks = mutableListOf<Pair<String, String>>()
 
                     if (sectionsArray != null) {
                         for (i in 0 until sectionsArray.length()) {
                             val section = sectionsArray.getJSONObject(i)
                             val sectionTitle = section.optString("title")
                             
-                            // Check if this section contains seasons (For Mega Serials like Khusbu)
                             if (sectionTitle.contains("Seasons", ignoreCase = true)) {
                                 val itemsArray = section.optJSONArray("items")
                                 if (itemsArray != null) {
@@ -232,16 +232,13 @@ class DeeptoPlayProvider : MainAPI {
                         }
                     }
 
-                    // If we found season links, fetch all of them concurrently
                     if (seasonLinks.isNotEmpty()) {
-                        // Concurrent API Calls for all seasons
                         val fetchedSeasons = seasonLinks.map { (sTitle, sRouteUri) ->
                             async { fetchEpisodesForSeason(sRouteUri, sTitle) }
                         }.awaitAll()
 
-                        seasonsList.addAll(fetchedSeasons.filterNotNull())
+                        seasonsList.addAll(fetchedSeasons.filterNotNull().reversed()) // লেটেস্ট সিজন উপরে আনার জন্য রিভার্স করা হলো
                     } 
-                    // Fallback for normal series (where episodes are in the root JSON)
                     else {
                         if (sectionsArray != null) {
                             for (i in 0 until sectionsArray.length()) {
@@ -262,11 +259,13 @@ class DeeptoPlayProvider : MainAPI {
                                     }
                                     
                                     if (episodesList.isNotEmpty()) {
+                                        episodesList.reverse() // লেটেস্ট এপিসোড উপরে আনার জন্য রিভার্স করা হলো
                                         val seasonTitle = section.optString("title").ifEmpty { "Season 1" }
                                         seasonsList.add(SeasonItem(name = seasonTitle, episodes = episodesList))
                                     }
                                 }
                             }
+                            seasonsList.reverse() // লেটেস্ট সিজন উপরে আনার জন্য রিভার্স করা হলো
                         }
                     }
                     
@@ -279,7 +278,6 @@ class DeeptoPlayProvider : MainAPI {
                     }
 
                 } else {
-                    // For Films, Micro-Dramas, Shorts, etc.
                     val filmUrl = dataObj.optString("url")
                     if (filmUrl.isNotEmpty() && filmUrl != "null") {
                         return@withContext MediaStructure(
